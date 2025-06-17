@@ -1,4 +1,14 @@
 # ECG-Data-Noise-Filtering
+
+1. Load Data into a Folder in Google Drive
+2. Set the path in the code to the path to the folder
+   generate_ecg_summary(
+    data_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1/', # FOLDER PATH
+    output_csv_path='/content/drive/MyDrive/ECG Report/Mouse_1/ECG_Metrics_Summary.csv', # SET TO FOLDER + /ECG_Metrics_Summary.csv
+    output_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1/Filtered Data' # FOLDER PATH + /Filtered Data
+)
+3. Then Run the Data and find filtered files in the 'Filtered Data' Folder and the 'ECG_Metrics_Summary.csv'
+
 ## Overall Workflow of the Code
 
 1. **Load and Parse ECG Files**
