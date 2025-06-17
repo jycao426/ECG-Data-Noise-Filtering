@@ -1,12 +1,22 @@
-import numpy as np
-import pandas as pd
-import os
-from scipy.ndimage import label
-from scipy.signal import find_peaks
-import mimetypes
-from scipy.stats import zscore
-from statsmodels import robust
+%pip install heartpy
+import matplotlib.pyplot as plt
+from google.colab import drive
+drive.mount('/content/drive')
+# Install the wfdb package (needed for peak correction)
+%pip install wfdb
 
+# Import required libraries
+import numpy as np                 # Handles arrays and numerical calculations
+import pandas as pd               # For reading/writing CSV files
+import os                         # To handle file paths and directories
+from scipy.ndimage import label   # Not used here, but typically for image processing
+from scipy.signal import find_peaks  # For detecting peaks in ECG signals
+import mimetypes                  # Handles file type detection
+from scipy.stats import zscore    # Used for statistical outlier detection
+from statsmodels import robust    # Robust statistics (not directly used here)
+import wfdb.processing            # Used to refine and correct R-peak detection
+
+# Checks if the ECG file has usable data
 def check_file_format(file_path):
       times, voltages = open_ecg_data(file_path)
       if len(times) > 0 and len(voltages) > 0:
@@ -14,6 +24,7 @@ def check_file_format(file_path):
       else:
           return False
 
+# Opens a raw ECG text file and returns arrays of time and voltage values
 def open_ecg_data(file_path):
     times = []
     voltages = []
@@ -25,36 +36,31 @@ def open_ecg_data(file_path):
                 times.append(float(time_str))
                 voltages.append(float(voltage_str))
             except ValueError:
-                continue
+                continue  # Skips lines that can't be parsed into numbers
     return np.array(times), np.array(voltages)
 
+# Opens a filtered ECG file and keeps only the non-zero voltage data points
 def open_filtered_ecg(file_path):
-    """
-    Opens the filtered ECG file and returns times and voltages where voltage != 0.
-    """
     times = []
     voltages = []
     with open(file_path, 'r') as file:
         lines = file.readlines()
         for line in lines:
-            if line.startswith('Time'):  # Skip header
+            if line.startswith('Time'):  # Skip header line
                 continue
             try:
                 time_str, voltage_str = line.split()
                 time_val = float(time_str)
                 voltage_val = float(voltage_str)
-                if voltage_val != 0:  # Only keep nonzero voltages
+                if voltage_val != 0:  # Only keep non-zero voltages
                     times.append(time_val)
                     voltages.append(voltage_val)
             except ValueError:
                 continue
     return np.array(times), np.array(voltages)
 
-
+# Removes invalid RR intervals that contain zeroed-out segments
 def filter_rr_intervals(times, voltages, peaks):
-    """
-    After detecting R-peaks, remove RR intervals where the signal crosses zeroed (deleted) areas.
-    """
     clean_rr_intervals = []
     clean_peak_indices = []
 
@@ -72,44 +78,45 @@ def filter_rr_intervals(times, voltages, peaks):
 
     return np.array(clean_rr_intervals), np.array(clean_peak_indices)
 
-
+# Detects abnormal segments in the signal using a sliding window method
 def detect_abnormal_segments(times, voltages, window_size=100, step_fraction=0.25,
                               std_factor_low=0.3, std_factor_high=2.0, mean_thresh_factor=1.2,
                               plot_debug=False):
     voltages = np.array(voltages)
     times = np.array(times)
 
-    global_std = np.std(voltages)
-    global_mean = np.mean(np.abs(voltages))
+    global_std = np.std(voltages)  # Standard deviation of the whole signal
+    global_mean = np.mean(np.abs(voltages))  # Average signal magnitude
 
+    # Define threshold limits based on global values
     std_thresh_low = std_factor_low * global_std
     std_thresh_high = std_factor_high * global_std
     mean_thresh = mean_thresh_factor * global_mean
 
     stds = []
     abnormal_times = []
-    step_size = int(window_size * step_fraction)
+    step_size = int(window_size * step_fraction)  # Step size for the sliding window
 
     for i in range(0, len(voltages) - window_size, step_size):
-        segment = voltages[i:i + window_size]
-        segment_std = np.std(segment)
-        segment_mean = np.abs(np.mean(segment))
+        segment = voltages[i:i + window_size]  # Select segment of signal
+        segment_std = np.std(segment)          # Standard deviation of segment
+        segment_mean = np.abs(np.mean(segment))  # Mean voltage of segment
         stds.append(segment_std)
 
-        # If abnormal std or abnormal mean, record midpoint time
+        # If segment has abnormal std or mean, record the midpoint time
         if segment_std < std_thresh_low or segment_std > std_thresh_high or segment_mean > mean_thresh:
             mid_time = times[i + window_size // 2]
 
-            # Debounce (skip if close to last)
+            # Skip adding points that are too close to the previous one
             if len(abnormal_times) == 0 or (mid_time - abnormal_times[-1] > 0.2):
                 abnormal_times.append(mid_time)
 
     return np.array(abnormal_times), stds
 
-
+# Groups abnormal segment timestamps if they're close together
 def consolidate_abnormal_segments(abnormal_times, merge_distance=1.0):
     if len(abnormal_times) == 0:
-      return np.array([])  # Immediately return empty array if no abnormal times
+      return np.array([])  # Return empty if no abnormal segments
     abnormal_times = np.sort(abnormal_times)
     group_flags = np.diff(abnormal_times) > merge_distance
     group_flags = np.insert(group_flags, 0, True)  # start new group
@@ -118,88 +125,72 @@ def consolidate_abnormal_segments(abnormal_times, merge_distance=1.0):
     unique_centers = [np.mean(abnormal_times[group_ids == gid]) for gid in np.unique(group_ids)]
     return np.array(unique_centers)
 
+# Removes abnormal segments and reindexes the remaining clean signal
 def remove_and_concatenate_clean_segments(times, voltages, abnormal_times, buffer=0.5):
     mask = np.ones_like(times, dtype=bool)
     for t_ab in abnormal_times:
-        mask &= ~((times >= t_ab - buffer) & (times <= t_ab + buffer))
+        mask &= ~((times >= t_ab - buffer) & (times <= t_ab + buffer))  # Exclude range around each abnormal segment
     clean_times = times[mask]
     clean_voltages = voltages[mask]
-    clean_times -= clean_times[0]
+    clean_times -= clean_times[0]  # Reset time to start from 0
     return clean_times, clean_voltages
-def get_adaptive_prominence(voltages, lower=90, scale=0.3):
-    """
-    Computes a dynamic prominence threshold for peak detection based on signal amplitude distribution.
-    """
+
+# Computes a dynamic threshold for detecting peaks in noisy data
+def get_adaptive_prominence(voltages, lower=90, scale=0.35):
+    # Returns a threshold that adapts based on the 90th percentile of signal amplitude
     return np.percentile(np.abs(voltages), lower) * scale
 
+# Detects R-peaks, filters invalid RR intervals, and calculates HRV and heart rate
 def calculate_hrv(times, voltages, fs=2000, window_sec=4):
+    # --- Initial rough detection using scipy ---
     dt = np.median(np.diff(times))
-    if not np.isclose(dt, 1/fs, atol=1e-4):
-        print(f"Warning: Sampling interval {dt:.6f}s doesn't match expected {1/fs:.6f}s (fs={fs}Hz)")
-
-    rr_min_sec = 0.04  # minimum RR = 40ms
+    rr_min_sec = 0.05  # Minimum distance between peaks in seconds (mice have high HR)
     min_distance_samples = int(rr_min_sec * fs)
-    prominence_mV = get_adaptive_prominence(voltages)
+    prominence_mV =  max(get_adaptive_prominence(voltages, lower=88, scale=0.45), 0.08)
 
-    # --- Window-based R-peak detection ---
-    total_samples = len(voltages)
-    window_samples = int(window_sec * fs)
+    raw_peaks, _ = find_peaks(
+        voltages,
+        distance=min_distance_samples,
+        prominence=prominence_mV
+    )
 
-    all_peaks = []
+    # Refines the detected R-peaks using WFDB correction algorithm
+    corrected_peaks = wfdb.processing.correct_peaks(
+      sig=voltages,
+      peak_inds=raw_peaks,
+      search_radius=int(0.025 * fs),
+      smooth_window_size=int(0.020 * fs),
+      peak_dir="up"
+    )
 
-    for start in range(0, total_samples, window_samples):
-        end = min(start + window_samples, total_samples)
-        segment_voltages = voltages[start:end]
-        segment_times = times[start:end]
-
-        # Skip short segments
-        if len(segment_voltages) < 3:
-            continue
-
-        peaks, _ = find_peaks(
-            segment_voltages,
-            distance=min_distance_samples,
-            prominence=prominence_mV
-        )
-
-        # Offset peak indices by start index
-        all_peaks.extend((start + peaks).tolist())
-
-    all_peaks = np.array(all_peaks)
-
-    if len(all_peaks) < 2:
-        print("No or insufficient peaks found across windows.")
-        return None, None, None, None
-
-    r_peak_times = times[all_peaks]
+    # Calculates RR intervals and filters out invalid durations
+    r_peak_times = times[corrected_peaks]   
     rr_intervals = np.diff(r_peak_times)
+    rr_intervals = rr_intervals[(rr_intervals > 0.06) & (rr_intervals < 0.2)]  # Valid RR range in seconds
 
     if len(rr_intervals) < 2:
-        print("Not enough RR intervals to calculate HRV.")
-        return None, None, None, None
+      print("❌ Not enough valid RR intervals.")
+      return None, None, None, None
 
     mean_rr = np.mean(rr_intervals)
     sdnn_sec = np.std(rr_intervals)
-    sdnn_bpm = (60 / mean_rr**2) * sdnn_sec
-    hr_bpm = 60 / mean_rr
+    sdnn_bpm = (60 / mean_rr**2) * sdnn_sec  # Convert to bpm units
+    hr_bpm = 60 / mean_rr  # Average heart rate in bpm
 
-    return sdnn_bpm, rr_intervals, all_peaks, hr_bpm
+    return sdnn_bpm, rr_intervals, corrected_peaks, hr_bpm
 
+# Removes zero-valued points and reindexes time to begin from zero
 def shift_and_shorten(times, voltages):
-    """
-    Shift all non-zero voltages to the front of the array and discard trailing zeros.
-    Keeps the corresponding time values in sync and reindexes time from zero.
-    """
     nonzero_mask = voltages != 0
-    valid_voltages = voltages[nonzero_mask]
+    valid_voltages = voltages[nonzero_mask]  # Keep only non-zero voltages
     dt = np.median(np.diff(times))
-    new_times = np.arange(len(valid_voltages)) * dt
+    new_times = np.arange(len(valid_voltages)) * dt  # Generate new time array
     return new_times, valid_voltages
 
-
+# Filters voltage outliers using Z-score (statistical method)
 def zscore_filter(times, voltages, threshold=2.0):
     z_scores = zscore(voltages)
-    mask = np.abs(z_scores) < threshold
+    mask = np.abs(z_scores) < threshold  # Keep only values within threshold
     removed_count = len(mask) - np.sum(mask)
     print(f"Z-score filtering removed {removed_count} amplitude outlier points")
 
@@ -208,10 +199,17 @@ def zscore_filter(times, voltages, threshold=2.0):
 
     return filtered_times, filtered_voltages
 
+    data_folder_path='/content/drive/MyDrive/ECG Report/Reports_Bl6_Pilot/F Testing BL/',
+    output_csv_path='/content/drive/MyDrive/ECG Report/Reports_Bl6_Pilot/F Testing BL/ECG_Metrics_Summary.csv',
+    output_folder_path='/content/drive/MyDrive/ECG Report/Reports_Bl6_Pilot/F Testing BL/Filtered Data'
+)
+
+# Calculates the max voltage change considered normal (used to detect sudden spikes)
 def compute_adaptive_jump_threshold(voltages, percentile=99):
     diffs = np.abs(np.diff(voltages))
     return np.percentile(diffs, percentile)
 
+# Removes signal parts with abnormal amplitude using a mean-based rule
 def amplitude_based_filter(times, voltages, perc = 99, thresh=0.00001):
     abs_voltages = np.abs(voltages)
 
@@ -232,6 +230,7 @@ def amplitude_based_filter(times, voltages, perc = 99, thresh=0.00001):
 
     return times_filtered, voltages_filtered
 
+# Another amplitude filter but based on median (more robust to outliers)
 def amplitude_filter_median_based(times, voltages, thresh_ratio=1.2):
     abs_voltages = np.abs(voltages)
     median_amp = np.median(abs_voltages)
@@ -249,6 +248,8 @@ def amplitude_filter_median_based(times, voltages, thresh_ratio=1.2):
 
     return times, voltages_filtered
 
+# Plots and compares heart rate (HR) and heart rate variability (HRV)
+# between software results (ECGenie) and filtered results from your pipeline
 def plot_ecg_correlation(software_data):
     """
     Plots HR and HRV comparisons and correlation between ECGenie software and filtered pipeline.
@@ -333,9 +334,15 @@ def plot_ecg_correlation(software_data):
 
 
 
-
 def process_ecg_file(file_path,  output_folder, jump_threshold=0.5,
                      std_thresh_low=0.02, std_thresh_high=0.8):
+# Entire process of cleaning ECG:
+    # 1. Load raw signal
+    # 2. Remove outliers and sudden jumps
+    # 3. Identify and delete abnormal segments
+    # 4. Apply amplitude/z-score filtering
+    # 5. Detect R-peaks and calculate HRV
+    # 6. Plot and save results
 
     # Load ECG
     times, voltages = open_ecg_data(file_path)
@@ -400,8 +407,8 @@ def process_ecg_file(file_path,  output_folder, jump_threshold=0.5,
     # sdnn_post_amp, rr_post_amp, peaks_post_amp, hr_bpm_post_amp = calculate_hrv(times_filtered_amp, voltages_filtered_amp)
     # sdnn_post_amp_med, rr_post_amp_med, peaks_post_amp_med, hr_bpm_post_amp_med = calculate_hrv(times_filtered_amp_med, voltages_filtered_amp_med)
 
+    # Calculate the mean rr interval
     rr_mean = np.mean(rr_con)
-
 
     # Plotting
     # Calculate dynamic y-axis limits
@@ -409,7 +416,7 @@ def process_ecg_file(file_path,  output_folder, jump_threshold=0.5,
     std_amp = np.std(voltages)
     plot_range = (mean_amp - 3 * std_amp, mean_amp + 3 * std_amp)  # Adjust 3 as needed
 
-    # Plot Original
+    # Plot Original Data
     plt.figure(figsize=(20, 5))
     plt.plot(times, voltages, color='blue', linewidth=0.2)
     if peaks_before is not None:
@@ -421,8 +428,7 @@ def process_ecg_file(file_path,  output_folder, jump_threshold=0.5,
     plt.grid(True)
     plt.show()
 
-    # Plot graphs
-
+    # Plot Filtered Sections Graphs
     # plt.subplot(3, 1, 2)
     # plt.plot(times_cleaned, voltages_cleaned, color='red', linewidth=0.2)
     # plt.title("Filtered ECG Data (Outliers + Spikes Removed)")
@@ -444,7 +450,6 @@ def process_ecg_file(file_path,  output_folder, jump_threshold=0.5,
     plt.tight_layout()
     plt.show()
 
-
     # Plot Concatenated ECG
     plt.figure(figsize=(20, 5))
     plt.plot(times_filtered, voltages_filtered, color='blue', linewidth=0.2)
@@ -453,7 +458,7 @@ def process_ecg_file(file_path,  output_folder, jump_threshold=0.5,
     plt.title("Concatenated ECG (Zeros Removed & Time Reindexed)")
     plt.xlabel("Time (s)")
     plt.ylabel("Voltage (mV)")
-    plt.ylim(plot_range)
+    plt.ylim(-4,4)
     plt.tight_layout()
     plt.grid(True)
     plt.show()
@@ -471,33 +476,6 @@ def process_ecg_file(file_path,  output_folder, jump_threshold=0.5,
     plt.grid(True)
     plt.show()
 
-    # # Plot Amplitude-based filtering with mean
-    # plt.figure(figsize=(20, 5))
-    # plt.plot(times_filtered_amp, voltages_filtered_amp, color='blue', linewidth=0.2)
-    # if peaks_post_amp is not None:
-    #     plt.plot(times_filtered_amp[peaks_post_amp], voltages_filtered_amp[peaks_post_amp], 'ro', label="R-peaks", markersize=4)
-    # plt.title("Amplitude based filtering with Mean")
-    # plt.xlabel("Time (s)")
-    # plt.ylim(plot_range)
-    # plt.tight_layout()
-    # plt.grid(True)
-    # plt.show()
-
-
-    # # Plot Amplitude-based filtering with median
-    # plt.figure(figsize=(20, 5))
-    # plt.plot(times_filtered_amp_med, voltages_filtered_amp_med, color='blue', linewidth=0.2)
-    # if peaks_post_amp_med is not None:
-    #     plt.plot(times_filtered_amp_med[peaks_post_amp_med], voltages_filtered_amp_med[peaks_post_amp_med], 'ro', label="R-peaks", markersize=4)
-    # plt.title("Amplitude based filtering with Median")
-    # plt.xlabel("Time (s)")
-    # plt.ylabel("Voltage (mV)")
-    # plt.ylim(plot_range)
-    # plt.tight_layout()
-    # plt.grid(True)
-    # plt.show()
-
-
 
     # Plot histogram of RR intervals as step histograms
     plt.subplot(1, 2, 2)
@@ -514,46 +492,48 @@ def process_ecg_file(file_path,  output_folder, jump_threshold=0.5,
     plt.grid(True)
 
     # Print HRV and BPM
-    print(f"Before filtering: HRV:{sdnn_before}, BPM:{hr_bpm_before}")
-    print(f"After auto-filtering: HRV:{sdnn_after}, BPM:{hr_bpm_after}")
-    print(f"After concatenation: HRV:{sdnn_con}, BPM:{hr_bpm_con}")
-    print(f"After 2nd z-score on concatenation: HRV:{sdnn_con}, BPM:{hr_bpm_con}")
+    print(f"Before filtering: HRV: {sdnn_before}, BPM: {hr_bpm_before}, R-peaks: {len(peaks_before)}")
+    print(f"After auto-filtering: HRV: {sdnn_after}, BPM: {hr_bpm_after}, R-peaks: {len(peaks_after)}")
+    print(f"After concatenation: HRV: {sdnn_con}, BPM: {hr_bpm_con}, R-peaks: {len(peaks_con)}")
+    print(f"After 2nd z-score on concatenation: HRV: {sdnn_z_con}, BPM: {hr_bpm_z_con}, R-peaks: {len(peaks_z_con)}")
+
     # print(f"After amplitude-based filtering with mean: HRV:{sdnn_post_amp}, BPM:{hr_bpm_post_amp}")
     # print(f"After amplitude-based filtering with median: HRV:{sdnn_post_amp_med}, BPM:{hr_bpm_post_amp_med}")
 
-
-
-    os.makedirs(output_folder,exist_ok=True)
-    reconstructed_voltages = np.zeros_like(voltages)
-    for t_filtered, v_filtered in zip(times_filtered, voltages_filtered):
-      idx = np.where(times == t_filtered)[0]
-      if len(idx) > 0:
-        reconstructed_voltages[idx[0]] = v_filtered
-
+    # Create text file with filtered times and voltages
+    os.makedirs(output_folder,exist_ok=True) 
     output_filename = os.path.basename(file_path).replace('.txt', '_filtered.txt')
     output_path = os.path.join(output_folder, output_filename)
 
+    # Add the times and voltages to the created file
     with open(output_path, 'w') as f:
-      f.write("Time\t      Voltage\n")
-      for t,v in zip(times, reconstructed_voltages):
-        f.write(f"{t:.6f}\t{v:.6f}\n")
-    # with open(output_path, 'w') as f:
-    #   f.write("Time\tVoltage\n")
-    #   for t, v in zip(times_auto_filtered, voltages_auto_filtered):
-    #     f.write(f"{t:.6f}\t{v:.6f}\n")
+        f.write("Time\tVoltage\n")
+        for t, v in zip(times_filtered, voltages_filtered):
+            f.write(f"{t:.6f}\t{v:.6f}\n")
+
 
     print(f"Saved filtered file to: {output_path}")
 
-    return times_auto_filtered, voltages_auto_filtered, sdnn_con, rr_mean, hr_bpm_con
+    return times_auto_filtered, voltages_auto_filtered, sdnn_con, rr_mean, hr_bpm_con, len(peaks_con)
 
 
 def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
+ # Goes through every .txt file in the folder:
+    # - Checks if it’s valid
+    # - Runs it through `process_ecg_file`
+    # - Collects results like HR, HRV, average RR interval
+    # - Saves everything into a summary .csv
+    # - Compares your results with ECGenie software (auto and manually cleaned)
+
     summary_data = []
     ecg_hr, ecg_hrv = [],[]
     data_hr, data_hrv = [],[]
     software_path = os.path.join(data_folder_path, "ECGenie Outputs.csv")
+    software_cut_path = os.path.join(data_folder_path, "ECGenie with Cuts.csv")
+    cut_data = {} 
     software_data = {}
 
+    # List out the data received from the ECGenie outputs
     if os.path.exists(software_path):
         df_software = pd.read_csv(software_path)
         if "File" in df_software.columns and "HR(bpm)" in df_software.columns and "HRvar(bpm)" in df_software.columns:
@@ -563,12 +543,25 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
                     "HRV": row["HRvar(bpm)"]
                 }
         else:
-            print("❌ Missing columns in ECGenie spreadsheet.")
+            print("❌ Missing columns in ECGenie Output spreadsheet.")
     else:
         print("❌ ECGenie output spreadsheet not found.")
+
+    if os.path.exists(software_cut_path):
+        df_software = pd.read_csv(software_cut_path)
+        if "File" in df_software.columns and "HR(bpm)" in df_software.columns and "HRvar(bpm)" in df_software.columns:
+            for _, row in df_software.iterrows():
+                cut_data[row["File"]] = {
+                    "HR": row["HR(bpm)"],
+                    "HRV": row["HRvar(bpm)"]
+                }
+        else:
+            print("❌ Missing columns in ECGenie Manual Cuts spreadsheet.")
+    else:
+        print("❌ ECGenie Manual Cuts output spreadsheet not found.")
     
 
-
+    # Run through all files in the folder
     for filename in sorted(os.listdir(data_folder_path)):
         if filename.endswith(".txt") and "_filtered" not in filename and "_metrics" not in filename:
             file_path = os.path.join(data_folder_path, filename)
@@ -582,6 +575,7 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
                     "HR (BPM)": None,
                     "SDNN (s)": None,
                     "RR (s)": None,
+                    "# of Signals": None
                     # "PR (s)": None,
                     # "QRS (s)": None,
                     # "QT (s)": None,
@@ -599,22 +593,27 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
                 mouse_id = "_".join(parts[1:]) if len(parts) > 1 else "Unknown"
 
                 # Process the file (filtering and cleaning)
-                times_filtered, voltages_filtered, sdnn_con, mean_rr, hr_clean = process_ecg_file(
+                times_filtered, voltages_filtered, sdnn_con, mean_rr, hr_clean, signals = process_ecg_file(
                     file_path, output_folder_path)
 
                 # Append to arrays for correlation plotting
                 if filename in software_data and hr_clean is not None and sdnn_con is not None:
                     software_data[filename]["Filtered HR"] = hr_clean
                     software_data[filename]["Filtered HRV"] = sdnn_con
+                
+                if filename in cut_data and hr_clean is not None and sdnn_con is not None:
+                    cut_data[filename]["Filtered HR"] = hr_clean
+                    cut_data[filename]["Filtered HRV"] = sdnn_con
 
 
-                # Summary
+                # Summary csv file
                 summary_data.append({
                     "File": filename,
                     "Mouse ID": mouse_id,
                     "HR (BPM)": hr_clean,
                     "HRV (BPM)": sdnn_con,
                     "RR (s)": mean_rr,
+                    "# of Signals": signals
                     # Uncomment and customize if needed:
                     # "PR (s)": pr_interval,
                     # "QRS (s)": qrs_duration,
@@ -643,7 +642,14 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
                     "QT x HR": None,
                     "PQ x HR": None
                 })
+
+    # Plot correlation between auto-clean Ecgenie vs. my algorithm
+    print("Auto-Clean ECGenie vs. Algorithm")
     plot_ecg_correlation(software_data)
+
+    # Plot correlation between manual-clean Ecgenie vs. my algorithm 
+    print("Manual-Clean ECGenie vs. Algorithm")
+    plot_ecg_correlation(cut_data)
 
     # Save all summary data to a CSV file
     summary_df = pd.DataFrame(summary_data)
@@ -652,10 +658,10 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
     print(f"\n✅ ECG summary exported to: {output_csv_path}")
 
 
-# for filename in sorted(os.listdir(folder_path)):
+# Run the method to run through the data and create the summary file
 generate_ecg_summary(
-    data_folder_path='/content/drive/MyDrive/ECG Report/Reports_Bl6_Pilot/F Testing BL/',
-    output_csv_path='/content/drive/MyDrive/ECG Report/Reports_Bl6_Pilot/F Testing BL/ECG_Metrics_Summary.csv',
-    output_folder_path='/content/drive/MyDrive/ECG Report/Reports_Bl6_Pilot/F Testing BL/Filtered Data'
+    data_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1/',
+    output_csv_path='/content/drive/MyDrive/ECG Report/Mouse_1/ECG_Metrics_Summary.csv',
+    output_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1/Filtered Data'
 )
 
