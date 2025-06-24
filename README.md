@@ -138,7 +138,7 @@
 
 **10 Summary Metrics CSV**
 
-- Collects HR, RR, and SDNN per file.
+- Collects HR, RR, SDNN, and % removed per file.
 - Saves this data to `ECG_Metrics_Summary.csv` for easy review.
 1. **Plot Correlation Plot for HRV(SDNN) and RR**
     1. Assess the HRV Correlation Plot
@@ -157,3 +157,5 @@
     - **Wider scatter** → Greater difference between original and filtered intervals.
     
     c. Print out the pearson correlation plot for HRV and HR
+
+- LOOK AT IMAGES FOR EXAMPLE OUTPUTS OF THE CODE
