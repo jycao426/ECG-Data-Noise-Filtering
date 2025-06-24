@@ -1,0 +1,333 @@
+import os
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.stats import pearsonr
+
+# FIRST FOR HRV
+# Step 1: Load file
+data_folder_path = '/content/drive/MyDrive/ECG Report'
+input_file = os.path.join(data_folder_path, 'ALL DATA Mouse 1+2 - HRV.csv')
+df = pd.read_csv(input_file)
+
+# Step 2: Melt to long format
+df_long = df.melt(id_vars=['Animal', 'Session'], 
+                  var_name='Simulation', 
+                  value_name='HRV')
+
+# Step 3: Group and compute averages
+avg_df = df_long.groupby(['Animal', 'Session', 'Simulation'])['HRV'].mean().reset_index()
+
+# Step 4: Save averaged result
+output_file = os.path.join(data_folder_path, 'HRV_Averages_By_Simulation.csv')
+avg_df.to_csv(output_file, index=False)
+print(f"✅ Averages by simulation saved to: {output_file}")
+
+# Step 5: Filter out missing or invalid values
+avg_df = avg_df.dropna(subset=["HRV"])
+avg_df = avg_df[avg_df["HRV"] > 0]
+
+# Step 6: Violin plot by simulation
+custom_palette = {1: "#F28E8E", 2: "#4F81BD"}  # Mouse 1 = pink, Mouse 2 = blue
+plt.figure(figsize=(12, 6))
+sns.violinplot(data=avg_df, x='Simulation', y='HRV', hue='Animal', split=True, inner='box', palette=custom_palette)
+plt.title("Heart Rate Variability (BPM) Across Simulations and Mice")
+plt.xlabel("Simulation Condition")
+plt.ylabel("Average HRV (BPM)")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Step 7: Violin plot by mouse
+plt.figure(figsize=(10, 6))
+sns.violinplot(data=avg_df, x='Animal', y='HRV', hue='Simulation', inner='box')
+plt.title("HRV (BPM) Comparison Between Mice by Simulation")
+plt.xlabel("Mouse ID")
+plt.ylabel("Average HRV (BPM)")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Step 8: Coefficient of Variation (CV) Comparison
+df_long = df_long.dropna(subset=["HRV"])
+df_long["Source"] = df_long["Simulation"].apply(lambda x: "ECGenie" if x.endswith("-ECGenie") else "MyAlgorithm")
+df_long["BaseSim"] = df_long["Simulation"].str.replace("-ECGenie", "", regex=False)
+
+cv_results = (
+    df_long
+    .groupby(["Animal", "BaseSim", "Source"])["HRV"]
+    .agg(['mean', 'std'])
+    .reset_index()
+)
+cv_results["CV (%)"] = (cv_results["std"] / cv_results["mean"]) * 100
+
+print("\n📊 Coefficient of Variation (CV) by Mouse and Simulation:")
+print(cv_results)
+
+cv_output = os.path.join(data_folder_path, 'HRV_CV_ECGenie_vs_Algorithm.csv')
+cv_results.to_csv(cv_output, index=False)
+
+# Step 9: Correlation plot between ECGenie and MyAlgorithm
+algo_df = df_long[df_long["Source"] == "MyAlgorithm"].copy()
+ecg_df = df_long[df_long["Source"] == "ECGenie"].copy()
+
+# Build unique keys for merging
+algo_df["SimKey"] = algo_df["Animal"].astype(str) + "_" + algo_df["Session"].astype(str) + "_" + algo_df["BaseSim"]
+ecg_df["SimKey"] = ecg_df["Animal"].astype(str) + "_" + ecg_df["Session"].astype(str) + "_" + ecg_df["BaseSim"]
+
+# Merge on SimKey
+merged = pd.merge(
+    algo_df[["SimKey", "HRV", "Animal", "BaseSim"]],
+    ecg_df[["SimKey", "HRV"]],
+    on="SimKey",
+    suffixes=("_MyAlgo", "_ECGenie")
+)
+
+# Step 10: Scatter correlation plot
+plt.figure(figsize=(8, 6))
+sns.scatterplot(
+    data=merged,
+    x="HRV_MyAlgo",
+    y="HRV_ECGenie",
+    hue="BaseSim",
+    style="Animal",
+    palette="Set2",
+    s=100
+)
+
+# Ideal line y=x
+min_val = min(merged["HRV_MyAlgo"].min(), merged["HRV_ECGenie"].min())
+max_val = max(merged["HRV_MyAlgo"].max(), merged["HRV_ECGenie"].max())
+plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Correlation')
+
+plt.xlabel("My Algorithm HRV")
+plt.ylabel("ECGenie HRV")
+plt.title("Correlation Between My Algorithm and ECGenie HRV Values")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Step 11: Pearson Correlation Coefficient
+if len(merged) >= 2:
+    r, p = pearsonr(merged["HRV_MyAlgo"], merged["HRV_ECGenie"])
+    print(f"📈 Pearson Correlation Coefficient: r = {r:.3f} (p = {p:.4f})")
+else:
+    print("❌ Not enough data points to calculate correlation.")
+
+# Step 12: Correlation Based on Averages Only
+avg_df["Source"] = avg_df["Simulation"].apply(lambda x: "ECGenie" if x.endswith("-ECGenie") else "MyAlgorithm")
+avg_df["BaseSim"] = avg_df["Simulation"].str.replace("-ECGenie", "", regex=False)
+
+avg_algo = avg_df[avg_df["Source"] == "MyAlgorithm"].copy()
+avg_ecg = avg_df[avg_df["Source"] == "ECGenie"].copy()
+
+# Create merge key based on Animal, Session, and BaseSim
+avg_algo["Key"] = avg_algo["Animal"].astype(str) + "_" + avg_algo["Session"].astype(str) + "_" + avg_algo["BaseSim"]
+avg_ecg["Key"] = avg_ecg["Animal"].astype(str) + "_" + avg_ecg["Session"].astype(str) + "_" + avg_ecg["BaseSim"]
+
+# Merge average values
+avg_merged = pd.merge(
+    avg_algo[["Key", "HRV", "Animal", "BaseSim"]],
+    avg_ecg[["Key", "HRV"]],
+    on="Key",
+    suffixes=("_MyAlgo", "_ECGenie")
+)
+
+# Step 13: Plot correlation of averages
+plt.figure(figsize=(8, 6))
+sns.scatterplot(
+    data=avg_merged,
+    x="HRV_MyAlgo",
+    y="HRV_ECGenie",
+    hue="BaseSim",
+    style="Animal",
+    palette="Set1",
+    s=100
+)
+
+# Ideal line
+min_val = min(avg_merged["HRV_MyAlgo"].min(), avg_merged["HRV_ECGenie"].min())
+max_val = max(avg_merged["HRV_MyAlgo"].max(), avg_merged["HRV_ECGenie"].max())
+plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Correlation')
+
+plt.title("📊 Correlation of AVERAGE HRV Between My Algorithm and ECGenie")
+plt.xlabel("My Algorithm Avg HRV")
+plt.ylabel("ECGenie Avg HRV")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Step 14: Pearson r on AVERAGES
+if len(avg_merged) >= 2:
+    r_avg, p_avg = pearsonr(avg_merged["HRV_MyAlgo"], avg_merged["HRV_ECGenie"])
+    print(f"📈 Pearson Correlation of AVERAGES: r = {r_avg:.3f} (p = {p_avg:.4f})")
+else:
+    print("❌ Not enough averaged points for correlation.")
+
+# FOR HR
+
+
+# Step 1: Load file
+data_folder_path = '/content/drive/MyDrive/ECG Report'
+input_file = os.path.join(data_folder_path, 'ALL DATA Mouse 1+2 - HR.csv')
+df = pd.read_csv(input_file)
+
+# Step 2: Melt to long format
+df_long = df.melt(id_vars=['Animal', 'Session'], 
+                  var_name='Simulation', 
+                  value_name='HR')
+
+# Step 3: Group and compute averages
+avg_df = df_long.groupby(['Animal', 'Session', 'Simulation'])['HR'].mean().reset_index()
+
+# Step 4: Save averaged result
+output_file = os.path.join(data_folder_path, 'HR_Averages_By_Simulation.csv')
+avg_df.to_csv(output_file, index=False)
+print(f"✅ Averages by simulation saved to: {output_file}")
+
+# Step 5: Filter out missing or invalid values
+avg_df = avg_df.dropna(subset=["HR"])
+avg_df = avg_df[avg_df["HR"] > 0]
+
+# Step 6: Violin plot by simulation
+custom_palette = {1: "#F28E8E", 2: "#4F81BD"}  # Mouse 1 = pink, Mouse 2 = blue
+plt.figure(figsize=(12, 6))
+sns.violinplot(data=avg_df, x='Simulation', y='HR', hue='Animal', split=True, inner='box', palette=custom_palette)
+plt.title("Heart Rate Variability (BPM) Across Simulations and Mice")
+plt.xlabel("Simulation Condition")
+plt.ylabel("Average HR (BPM)")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Step 7: Violin plot by mouse
+plt.figure(figsize=(10, 6))
+sns.violinplot(data=avg_df, x='Animal', y='HR', hue='Simulation', inner='box')
+plt.title("HR (BPM) Comparison Between Mice by Simulation")
+plt.xlabel("Mouse ID")
+plt.ylabel("Average HR (BPM)")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Step 8: Coefficient of Variation (CV) Comparison
+df_long = df_long.dropna(subset=["HR"])
+df_long["Source"] = df_long["Simulation"].apply(lambda x: "ECGenie" if x.endswith("-ECGenie") else "MyAlgorithm")
+df_long["BaseSim"] = df_long["Simulation"].str.replace("-ECGenie", "", regex=False)
+
+cv_results = (
+    df_long
+    .groupby(["Animal", "BaseSim", "Source"])["HR"]
+    .agg(['mean', 'std'])
+    .reset_index()
+)
+cv_results["CV (%)"] = (cv_results["std"] / cv_results["mean"]) * 100
+
+print("\n📊 Coefficient of Variation (CV) by Mouse and Simulation:")
+print(cv_results)
+
+cv_output = os.path.join(data_folder_path, 'HR_CV_ECGenie_vs_Algorithm.csv')
+cv_results.to_csv(cv_output, index=False)
+
+# Step 9: Correlation plot between ECGenie and MyAlgorithm
+algo_df = df_long[df_long["Source"] == "MyAlgorithm"].copy()
+ecg_df = df_long[df_long["Source"] == "ECGenie"].copy()
+
+# Build unique keys for merging
+algo_df["SimKey"] = algo_df["Animal"].astype(str) + "_" + algo_df["Session"].astype(str) + "_" + algo_df["BaseSim"]
+ecg_df["SimKey"] = ecg_df["Animal"].astype(str) + "_" + ecg_df["Session"].astype(str) + "_" + ecg_df["BaseSim"]
+
+# Merge on SimKey
+merged = pd.merge(
+    algo_df[["SimKey", "HR", "Animal", "BaseSim"]],
+    ecg_df[["SimKey", "HR"]],
+    on="SimKey",
+    suffixes=("_MyAlgo", "_ECGenie")
+)
+
+# Step 10: Scatter correlation plot
+plt.figure(figsize=(8, 6))
+sns.scatterplot(
+    data=merged,
+    x="HR_MyAlgo",
+    y="HR_ECGenie",
+    hue="BaseSim",
+    style="Animal",
+    palette="Set2",
+    s=100
+)
+
+# Ideal line y=x
+min_val = min(merged["HR_MyAlgo"].min(), merged["HR_ECGenie"].min())
+max_val = max(merged["HR_MyAlgo"].max(), merged["HR_ECGenie"].max())
+plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Correlation')
+
+plt.xlabel("My Algorithm HR")
+plt.ylabel("ECGenie HRV")
+plt.title("Correlation Between My Algorithm and ECGenie HR Values")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Step 11: Pearson Correlation Coefficient
+if len(merged) >= 2:
+    r, p = pearsonr(merged["HR_MyAlgo"], merged["HR_ECGenie"])
+    print(f"📈 Pearson Correlation Coefficient: r = {r:.3f} (p = {p:.4f})")
+else:
+    print("❌ Not enough data points to calculate correlation.")
+
+# Step 12: Correlation Based on Averages Only
+avg_df["Source"] = avg_df["Simulation"].apply(lambda x: "ECGenie" if x.endswith("-ECGenie") else "MyAlgorithm")
+avg_df["BaseSim"] = avg_df["Simulation"].str.replace("-ECGenie", "", regex=False)
+
+avg_algo = avg_df[avg_df["Source"] == "MyAlgorithm"].copy()
+avg_ecg = avg_df[avg_df["Source"] == "ECGenie"].copy()
+
+# Create merge key based on Animal, Session, and BaseSim
+avg_algo["Key"] = avg_algo["Animal"].astype(str) + "_" + avg_algo["Session"].astype(str) + "_" + avg_algo["BaseSim"]
+avg_ecg["Key"] = avg_ecg["Animal"].astype(str) + "_" + avg_ecg["Session"].astype(str) + "_" + avg_ecg["BaseSim"]
+
+# Merge average values
+avg_merged = pd.merge(
+    avg_algo[["Key", "HR", "Animal", "BaseSim"]],
+    avg_ecg[["Key", "HR"]],
+    on="Key",
+    suffixes=("_MyAlgo", "_ECGenie")
+)
+
+# Step 13: Plot correlation of averages
+plt.figure(figsize=(8, 6))
+sns.scatterplot(
+    data=avg_merged,
+    x="HR_MyAlgo",
+    y="HR_ECGenie",
+    hue="BaseSim",
+    style="Animal",
+    palette="Set1",
+    s=100
+)
+
+# Ideal line
+min_val = min(avg_merged["HR_MyAlgo"].min(), avg_merged["HR_ECGenie"].min())
+max_val = max(avg_merged["HR_MyAlgo"].max(), avg_merged["HR_ECGenie"].max())
+plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Correlation')
+
+plt.title("📊 Correlation of AVERAGE HR Between My Algorithm and ECGenie")
+plt.xlabel("My Algorithm Avg HR")
+plt.ylabel("ECGenie Avg HR")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Step 14: Pearson r on AVERAGES
+if len(avg_merged) >= 2:
+    r_avg, p_avg = pearsonr(avg_merged["HR_MyAlgo"], avg_merged["HR_ECGenie"])
+    print(f"📈 Pearson Correlation of AVERAGES: r = {r_avg:.3f} (p = {p_avg:.4f})")
+else:
+    print("❌ Not enough averaged points for correlation.")
+
+
