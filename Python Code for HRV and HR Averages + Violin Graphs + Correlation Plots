@@ -1,3 +1,8 @@
+%pip install heartpy
+import matplotlib.pyplot as plt
+from google.colab import drive
+drive.mount('/content/drive')
+
 import os
 import pandas as pd
 import seaborn as sns
