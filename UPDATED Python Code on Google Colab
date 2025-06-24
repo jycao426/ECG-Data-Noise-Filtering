@@ -1,3 +1,8 @@
+%pip install heartpy # install heart module
+import matplotlib.pyplot as plt # used for creating plots
+from google.colab import drive # allows access to drive
+drive.mount('/content/drive') # mounts the drive to the code for access
+
 # Install the 'wfdb' package, which is used for working with physiological signal data
 %pip install wfdb
 # Import the NumPy library for numerical operations and handling arrays
