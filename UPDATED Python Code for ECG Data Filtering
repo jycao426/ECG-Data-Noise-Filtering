@@ -259,7 +259,7 @@ def plot_ecg_correlation(software_data):
     ecg_hr = [software_data[f]["HR"] for f in filenames]
     ecg_hrv = [software_data[f]["HRV"] for f in filenames]
 
-    # Extract values for filtered HR and HRV (from your pipeline)
+    # Extract values for filtered HR and HRV 
     data_hr = [software_data[f]["Filtered HR"] for f in filenames]
     data_hrv = [software_data[f]["Filtered HRV"] for f in filenames]
 
@@ -335,6 +335,11 @@ def process_ecg_file(file_path, output_folder, jump_threshold=0.5,
                      std_thresh_low=0.02, std_thresh_high=0.8):
     # Main function to clean ECG signal, compute HRV, and return filtered results.
 
+    # Create image folder and name for output
+    image_folder = os.path.join(output_folder, "Filtered Data Images")
+    os.makedirs(image_folder, exist_ok=True)
+    base_filename = os.path.splitext(os.path.basename(file_path))[0]
+
     # Load ECG signal from file
     times, voltages = open_ecg_data(file_path)
     print(f"Original signal length: {len(voltages)} points")
@@ -393,57 +398,54 @@ def process_ecg_file(file_path, output_folder, jump_threshold=0.5,
     std_amp = np.std(voltages)            # Signal variability
     plot_range = (mean_amp - 3 * std_amp, mean_amp + 3 * std_amp)  # Y-limits = mean ± 3 std
 
+    fig, axs = plt.subplots(4, 1, figsize=(20, 20))
+       
     # --- Plot 1: Original ECG ---
-    plt.figure(figsize=(20, 5))  # Wide figure for visibility
-    plt.plot(times, voltages, color='blue', linewidth=0.2)  # Raw voltage trace
+    axs[0].plot(times, voltages, color='blue', linewidth=0.2)  # Raw voltage trace
     if peaks_before is not None:
-        plt.plot(times[peaks_before], voltages[peaks_before], 'ro', label="R-peaks", markersize=4)  # Mark R-peaks    
-    plt.title("Original ECG Data")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Voltage (mV)")
-    plt.ylim(plot_range)  # Set consistent vertical range
-    plt.grid(True)
-    plt.show()
+        axs[0].plot(times[peaks_before], voltages[peaks_before], 'ro', label="R-peaks", markersize=4)  # Mark R-peaks    
+    axs[0].set_title("Original ECG Data")
+    axs[0].set_xlabel("Time (s)")
+    axs[0].set_ylabel("Voltage (mV)")
+    axs[0].set_ylim(plot_range)  # Set consistent vertical range
+    axs[0].grid(True)
 
     # --- Plot 2: Auto-Filtered ECG ---
-    plt.figure(figsize=(20, 5))
-    plt.plot(times_auto_filtered, voltages_auto_filtered, color='blue', linewidth=0.2)
+    axs[1].plot(times_auto_filtered, voltages_auto_filtered, color='blue', linewidth=0.2)
     if peaks_after is not None:
-      plt.plot(times_auto_filtered[peaks_after], voltages_auto_filtered[peaks_after], 'ro', label="R-peaks", markersize=4)
-    plt.title("ECG (Auto-Filtered Abnormal Segments)")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Voltage (mV)")
-    plt.ylim(plot_range)
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+      axs[1].plot(times_auto_filtered[peaks_after], voltages_auto_filtered[peaks_after], 'ro', label="R-peaks", markersize=4)
+    axs[1].set_title("ECG (Auto-Filtered Abnormal Segments)")
+    axs[1].set_xlabel("Time (s)")
+    axs[1].set_ylabel("Voltage (mV)")
+    axs[1].set_ylim(plot_range)
+    axs[1].grid(True)
 
     # --- Plot 3: Concatenated ECG (Zeros Removed & Reindexed Time) ---
-    plt.figure(figsize=(20, 5))
-    plt.plot(times_filtered, voltages_filtered, color='blue', linewidth=0.2)
+    axs[2].plot(times_filtered, voltages_filtered, color='blue', linewidth=0.2)
     if peaks_con is not None:
-        plt.plot(times_filtered[peaks_con], voltages_filtered[peaks_con], 'ro', label="R-peaks", markersize=4)
-    plt.title("Concatenated ECG (Zeros Removed & Time Reindexed)")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Voltage (mV)")
-    plt.ylim(-4, 4)  # Fixed range for comparing across recordings
-    plt.tight_layout()
-    plt.grid(True)
-    plt.show()
+        axs[2].plot(times_filtered[peaks_con], voltages_filtered[peaks_con], 'ro', label="R-peaks", markersize=4)
+    axs[2].set_title("Concatenated ECG (Zeros Removed & Time Reindexed)")
+    axs[2].set_xlabel("Time (s)")
+    axs[2].set_ylabel("Voltage (mV)")
+    axs[2].set_ylim(plot_range)  # Fixed range for comparing across recordings
+    axs[2].grid(True)
 
     # --- Plot 4: After Second Z-score Filtering ---
-    plt.figure(figsize=(20, 5))
-    plt.plot(times_z_con, voltages_z_con, color='blue', linewidth=0.2)
+    axs[3].plot(times_z_con, voltages_z_con, color='blue', linewidth=0.2)
     if peaks_z_con is not None:
-        plt.plot(times_z_con[peaks_z_con], voltages_z_con[peaks_z_con], 'ro', label="R-peaks", markersize=2)
-    plt.title("2nd Z-score Filtering on concatenated data")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Voltage (mV)")
-    plt.ylim(plot_range)
-    plt.tight_layout()
-    plt.grid(True)
-    plt.show()
+        axs[3].plot(times_z_con[peaks_z_con], voltages_z_con[peaks_z_con], 'ro', label="R-peaks", markersize=2)
+    axs[3].set_title("2nd Z-score Filtering on concatenated data")
+    axs[3].set_xlabel("Time (s)")
+    axs[3].set_ylabel("Voltage (mV)")
+    axs[3].set_ylim(plot_range)
+    axs[3].grid(True)
 
+    # Export image layout to Folder titled "Filter Data Images" as jpg
+    output_img_path = os.path.join(image_folder, f"{base_filename}_summary.jpg")
+    plt.tight_layout()
+    plt.savefig(output_img_path, dpi=300)
+    plt.show()
+    plt.close()
 
     # --- Plot histogram of RR intervals at each filtering step ---
     plt.subplot(1, 2, 2)  # Create second subplot for histogram
@@ -487,7 +489,9 @@ def process_ecg_file(file_path, output_folder, jump_threshold=0.5,
     print(f"Saved filtered file to: {output_path}")  # Confirm file save
 
     # --- Return key results ---
-    return times_auto_filtered, voltages_auto_filtered, sdnn_con, rr_mean, hr_bpm_con, len(peaks_con)
+    percent_removed = 100 * (1 - len(voltages_auto_filtered) / len(voltages)) if len(voltages) > 0 else None
+    return times_auto_filtered, voltages_auto_filtered, sdnn_con, rr_mean, hr_bpm_con, len(peaks_con), percent_removed
+
 
 def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
     # Initialize containers for summary output and comparisons
@@ -562,8 +566,8 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
                 mouse_id = "_".join(parts[1:]) if len(parts) > 1 else "Unknown"
 
                 # Process the ECG file: applies cleaning, filtering, and computes HR metrics
-                times_filtered, voltages_filtered, sdnn_con, mean_rr, hr_clean, signals = process_ecg_file(
-                    file_path, output_folder_path)
+                times_filtered, voltages_filtered, sdnn_con, mean_rr, hr_clean, signals, percent_removed = process_ecg_file(
+    file_path, output_folder_path)
 
                 # If ECGenie (automated) data exists and cleaned HRV/HR values are valid, update the entry
                 if filename in software_data and hr_clean is not None and sdnn_con is not None:
@@ -582,7 +586,8 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
                     "HR (BPM)": hr_clean,
                     "HRV (BPM)": sdnn_con,
                     "RR (s)": mean_rr,
-                    "# of Signals": signals
+                    "# of Signals": signals,
+                    "% Removed": percent_removed
                 })
 
             except Exception as e:
@@ -594,14 +599,8 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
                     "HR (BPM)": None,
                     "HRV(s)": None,
                     "RR (s)": None,
-                    "PR (s)": None,
-                    "QRS (s)": None,
-                    "QT (s)": None,
-                    "PQ (s)": None,
-                    "PR x HR": None,
-                    "QRS x HR": None,
-                    "QT x HR": None,
-                    "PQ x HR": None
+                    "# of Signals": None,
+                    "% Removed": None
                 })
 
 
@@ -623,8 +622,10 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
 
 # Run the ECG summary generation pipeline on all files in the specified folder
 generate_ecg_summary(
-    data_folder_path='/content/drive/MyDrive/ECG Report/Mouse_2_4/',  # Folder containing raw ECG .txt files and ECGenie outputs
-    output_csv_path='/content/drive/MyDrive/ECG Report/Mouse_2_4/ECG_Metrics_Summary.csv',  # Where to save the summary CSV
-    output_folder_path='/content/drive/MyDrive/ECG Report/Mouse_2_4/Filtered Data'  # Folder to store cleaned/filtered ECG text files
+    data_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1_4/',  # Folder containing raw ECG .txt files and ECGenie outputs
+    output_csv_path='/content/drive/MyDrive/ECG Report/Mouse_1_3/ECG_Metrics_Summary.csv',  # Where to save the summary CSV
+    output_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1_2/Filtered Data'  # Folder to store cleaned/filtered ECG text files
 )
+
+
 
