@@ -4,383 +4,260 @@
 import matplotlib.pyplot as plt
 from google.colab import drive
 drive.mount('/content/drive')
-# Import the NumPy library for numerical operations and handling arrays
-import numpy as np
-# Import the pandas library for data manipulation and working with CSV or tabular data
-import pandas as pd
-# Import os for interacting with the operating system, e.g., file paths
 import os
-# Import 'label' from scipy's ndimage module (not used here, but useful for labeling connected components)
-from scipy.ndimage import label
-# Import the 'find_peaks' function for detecting peaks in ECG signals
+import numpy as np
+import pandas as pd
 from scipy.signal import find_peaks
-# Import 'zscore' to compute Z-scores for outlier detection
 from scipy.stats import zscore
-# Import WFDB's peak correction utilities, useful for refining detected ECG peaks
 import wfdb.processing
+from scipy.stats import pearsonr
+import matplotlib.pyplot as plt
 
-from matplotlib.backends.backend_pdf import PdfPages
 
-
-# Function to check if a file contains valid ECG data
 def check_file_format(file_path):
-    # Try to open and parse the ECG file
+    # Checks if the ECG data file is correctly formatted by attempting to open and read it.
+    # Returns True if data is successfully read, False otherwise.
     times, voltages = open_ecg_data(file_path)
-
-    # If both time and voltage arrays are non-empty, the format is considered valid
     if len(times) > 0 and len(voltages) > 0:
         return True
     else:
         return False
 
-# Function to open an ECG text file and extract time and voltage data
 def open_ecg_data(file_path):
-    times = []       # Initialize empty list to store time values
-    voltages = []    # Initialize empty list to store voltage values
-
-    # Open the file for reading
+    # Opens a specified ECG data file and parses time and voltage values.
+    # Assumes a space-separated format 'time voltage' per line.
+    # Returns two numpy arrays: times and voltages.
+    times = []
+    voltages = []
     with open(file_path, 'r') as file:
-        lines = file.readlines()  # Read all lines from the file
-
-        # Loop through each line in the file
+        lines = file.readlines()
         for line in lines:
             try:
-                # Try to split each line into two parts: time and voltage
                 time_str, voltage_str = line.split()
-
-                # Convert the strings to floats and add them to the respective lists
                 times.append(float(time_str))
                 voltages.append(float(voltage_str))
-
-            # If a line cannot be split into two parts, skip it (e.g., empty or malformed line)
             except ValueError:
+                # Skips lines that do not conform to the expected 'time voltage' format.
                 continue
-
-    # Convert the lists to NumPy arrays for easier numerical processing and return them
     return np.array(times), np.array(voltages)
 
-
-# Flag unstable signal segments
 def detect_abnormal_segments(times, voltages, window_size=100, step_fraction=0.25,
                               std_factor_low=0.3, std_factor_high=2.0, mean_thresh_factor=1.2,
                               plot_debug=False):
-
-    voltages = np.array(voltages)  # Ensure input is a NumPy array
+    # Identifies segments of the ECG signal that are potentially abnormal based on statistical properties.
+    # Uses a sliding window approach to calculate standard deviation and mean absolute voltage.
+    # Segments with STD too low/high or mean too high are marked as abnormal.
+    voltages = np.array(voltages)
     times = np.array(times)
-
-    global_std = np.std(voltages)                      # Overall variability in the signal
-    global_mean = np.mean(np.abs(voltages))            # Overall average signal magnitude
-
-    std_thresh_low = std_factor_low * global_std       # Lower threshold for segment variability
-    std_thresh_high = std_factor_high * global_std     # Upper threshold for segment variability
-    mean_thresh = mean_thresh_factor * global_mean     # Threshold for signal magnitude
-
-    stds = []                 # Store standard deviations of each segment
-    abnormal_times = []      # Store center times of segments flagged as abnormal
-    step_size = int(window_size * step_fraction)  # Define how much to shift the window on each loop
-
-    # Slide a window through the signal to inspect chunks
+    global_std = np.std(voltages)
+    global_mean = np.mean(np.abs(voltages))
+    std_thresh_low = std_factor_low * global_std
+    std_thresh_high = std_factor_high * global_std
+    mean_thresh = mean_thresh_factor * global_mean
+    stds = []
+    abnormal_times = []
+    step_size = int(window_size * step_fraction)
     for i in range(0, len(voltages) - window_size, step_size):
-        segment = voltages[i:i + window_size]              # Extract segment
-        segment_std = np.std(segment)                      # Measure variability
-        segment_mean = np.abs(np.mean(segment))            # Measure average absolute value
-        stds.append(segment_std)                           # Track this segment’s std deviation
-
-        # Flag if this segment is too flat, too spiky, or too large in magnitude
+        segment = voltages[i:i + window_size]
+        segment_std = np.std(segment)
+        segment_mean = np.abs(np.mean(segment))
+        stds.append(segment_std)
+        # Marks a segment as abnormal if its standard deviation or absolute mean exceeds predefined thresholds.
         if segment_std < std_thresh_low or segment_std > std_thresh_high or segment_mean > mean_thresh:
-            mid_time = times[i + window_size // 2]         # Get the middle time point of the segment
-
-            # Avoid adding segments that are too close together (debouncing)
+            mid_time = times[i + window_size // 2]
+            # Prevents marking closely spaced abnormal segments as separate.
             if len(abnormal_times) == 0 or (mid_time - abnormal_times[-1] > 0.2):
-                abnormal_times.append(mid_time)            # Record as abnormal
-
-    return np.array(abnormal_times), stds  # Return abnormal timestamps and segment stds
-
+                abnormal_times.append(mid_time)
+    return np.array(abnormal_times), stds
 
 def consolidate_abnormal_segments(abnormal_times, merge_distance=1.0):
-    # If the input list is empty, return an empty NumPy array right away
+    # Consolidates closely spaced abnormal segments into single, representative points.
+    # This helps in simplifying the removal of noisy regions.
     if len(abnormal_times) == 0:
-        return np.array([])  # No abnormal segments to process
-
-    # Sort the abnormal timestamps in ascending order (time order)
+        return np.array([])
     abnormal_times = np.sort(abnormal_times)
-
-    # Identify where a new group should begin:
-    # If the time difference between two points is greater than the merge_distance,
-    # they belong to different groups
+    # Identifies new groups of abnormal segments based on a merge_distance.
     group_flags = np.diff(abnormal_times) > merge_distance
-
-    # Insert True at the beginning to always start the first group
     group_flags = np.insert(group_flags, 0, True)
-
-    # Assign a group ID to each timestamp using cumulative sum of the flags
-    # Every 'True' increases the group ID, thus separating clusters
     group_ids = np.cumsum(group_flags)
-
-    # For each group of nearby timestamps, compute the mean time (central point of the cluster)
+    # Calculates the mean time for each consolidated abnormal group.
     unique_centers = [np.mean(abnormal_times[group_ids == gid]) for gid in np.unique(group_ids)]
-
-    # Return the center points of all consolidated abnormal clusters as a NumPy array
     return np.array(unique_centers)
 
-
 def get_adaptive_prominence(voltages, lower=90, scale=0.35):
-    """
-    Computes a dynamic prominence threshold for peak detection based on signal amplitude distribution.
-    """
-    # Calculate the Nth percentile of the absolute voltage values
-    # This gives an idea of how "big" typical signal values are (e.g., 90th percentile = high peaks)
+    # Calculates an adaptive prominence threshold for peak detection.
+    # This threshold is based on a percentile of the absolute voltage values, scaled.
     percentile_value = np.percentile(np.abs(voltages), lower)
-
-    # Multiply the percentile value by a scaling factor to get a usable prominence threshold
     return percentile_value * scale
 
 def calculate_pnn50(rr_intervals):
-    """
-    Calculates the percentage of successive RR intervals that differ by more than 50ms.
-    """
+    # Calculates pNN50, a Heart Rate Variability (HRV) parameter.
+    # pNN50 is the percentage of successive RR intervals that differ by more than 50 milliseconds.
     if len(rr_intervals) < 2:
         return None
     rr_diff = np.abs(np.diff(rr_intervals))
-    nn50 = np.sum(rr_diff > 0.050)  # Count intervals > 50ms (0.05s)
+    nn50 = np.sum(rr_diff > 0.050) # Count of RR differences > 50ms (0.050 seconds).
     pnn50 = (nn50 / len(rr_diff)) * 100 if len(rr_diff) > 0 else 0
     return pnn50
 
-
-def calculate_hrv(times, voltages, fs=2000, window_sec=4):
-    """
-    Calculates HRV using find_peaks and refines with wfdb.processing.correct_peaks.
-    Assumes `times` and `voltages` are NumPy arrays.
-    Returns RMSSD (bpm), RR intervals (s), corrected peak indices, HR (bpm), and pNN50 (%).
-    """
-
-    # --- Step 1: Estimate sampling interval and detection parameters ---
-
-    dt = np.median(np.diff(times))     # Calculate average time difference between points (sampling interval)
-
-    rr_min_sec = 0.05                  # Minimum RR interval for mice (~600–700 bpm)
-    min_distance_samples = int(rr_min_sec * fs)  # Minimum number of samples between peaks
-
-    # Get a dynamic prominence threshold for peak detection
-    # Ensures peak detection adapts to signal strength (especially for noisy or low-magnitude data)
+def calculate_hrv(times, voltages, fs=2000):
+    # Calculates various Heart Rate Variability (HRV) parameters.
+    # Detects R-peaks, corrects them, and then computes SDNN, RMSSD, Mean HR, and pNN50.
+    dt = 1.0 / fs
+    rr_min_sec = 0.05 # Minimum R-R interval in seconds.
+    min_distance_samples = int(rr_min_sec * fs) # Minimum distance between peaks in samples.
+    # Determine prominence for peak detection based on the signal's amplitude.
     prominence_mV = max(get_adaptive_prominence(voltages, lower=88, scale=0.45), 0.08)
-
-    # --- Step 2: Detect raw R-peaks using basic thresholding ---
+    # Detects raw R-peaks using `find_peaks`.
     raw_peaks, _ = find_peaks(
         voltages,
-        distance=min_distance_samples,    # Ignore peaks too close together
-        prominence=prominence_mV          # Only include peaks that stand out sufficiently
+        distance=min_distance_samples,
+        prominence=prominence_mV
     )
-
-    # --- Step 3: Refine detected peaks using WFDB's correction method ---
-
+    # Corrects detected R-peaks for better accuracy using WFDB processing.
     corrected_peaks = wfdb.processing.correct_peaks(
-        sig=voltages,                     # Raw ECG signal
-        peak_inds=raw_peaks,             # Initial peak estimates
-        search_radius=int(0.025 * fs),   # Search ±radius around each peak for correction
-        smooth_window_size=int(0.020 * fs),  # Size of smoothing window to reduce false peaks
-        peak_dir="up"                    # Look for upward-facing peaks
+        sig=voltages,
+        peak_inds=raw_peaks,
+        search_radius=int(0.025 * fs),
+        smooth_window_size=int(0.020 * fs),
+        peak_dir="up"
     )
-
-    # --- Step 4: Compute RR intervals and filter out invalid values ---
-
-    r_peak_times = times[corrected_peaks]           # Convert peak indices to actual times
-    rr_intervals = np.diff(r_peak_times)            # Calculate time difference between consecutive R-peaks
-
-    # Keep only RR intervals within physiological bounds for mice (60–200 ms)
+    # Extracts time points of corrected R-peaks.
+    r_peak_times = times[corrected_peaks]
+    # Calculates RR intervals (time differences between successive R-peaks).
+    rr_intervals = np.diff(r_peak_times)
+    # Filters RR intervals to exclude physiologically improbable values.
     rr_intervals = rr_intervals[(rr_intervals > 0.06) & (rr_intervals < 0.2)]
-
-    # Check if enough intervals remain for a meaningful HRV calculation
     if len(rr_intervals) < 2:
-        print("❌ Not enough valid RR intervals.")
-        return None, None, None, None, None
-
-    # --- Step 5: Compute HRV (RMSSD) and HR ---
+        # Notifies if insufficient RR intervals are found for reliable HRV calculation.
+        print("❌ Not enough valid RR intervals for HRV calculation.")
+        return None, None, None, None, None, None
+    # Calculates SDNN (Standard Deviation of NN intervals).
+    sdnn_sec = np.std(rr_intervals)
     diff_rr = np.diff(rr_intervals)
-    rmssd_sec = np.sqrt(np.mean(diff_rr ** 2))     # RMSSD in seconds
-    mean_rr = np.mean(rr_intervals)                # Mean RR interval in seconds
-
-    rmssd_bpm = (60 / mean_rr**2) * rmssd_sec      # Convert RMSSD to bpm-scaled unit
-    hr_bpm = 60 / mean_rr                          # Average HR in bpm
-
-    # --- Step 6: Compute pNN50 ---
+    # Calculates RMSSD (Root Mean Square of Successive Differences).
+    rmssd_sec = np.sqrt(np.mean(diff_rr ** 2))
+    mean_rr = np.mean(rr_intervals)
+    # Calculates Heart Rate in beats per minute.
+    hr_bpm = 60 / mean_rr if mean_rr > 0 else None
+    # Calculates pNN50.
     pnn50 = calculate_pnn50(rr_intervals)
-
-    return rmssd_bpm, rr_intervals, corrected_peaks, hr_bpm, pnn50
+    return sdnn_sec, rmssd_sec, rr_intervals, corrected_peaks, hr_bpm, pnn50
 
 def shift_and_shorten(times, voltages):
-    """
-    Shift all non-zero voltages to the front of the array and discard trailing zeros.
-    Keeps the corresponding time values in sync and reindexes time from zero.
-    """
-
-    # Create a mask to identify all voltage values that are not zero
+    # Removes zero-voltage points and re-indexes the time array starting from zero.
+    # This is useful for processing signals where parts might be truncated or invalid.
     nonzero_mask = voltages != 0
-
-    # Filter out only the valid (non-zero) voltage values
     valid_voltages = voltages[nonzero_mask]
-
-    # Estimate the original sampling interval by taking the median difference between time points
+    # Estimates the time step from the valid time points.
     dt = np.median(np.diff(times))
-
-    # Create a new time array that starts from 0 and increases in uniform steps of dt
+    # Creates a new time array, starting from 0, for the valid voltages.
     new_times = np.arange(len(valid_voltages)) * dt
-
-    # Return the updated time and voltage arrays (with zeros removed and time reindexed)
     return new_times, valid_voltages
 
-
-# Remove voltage outliers using statistical thresholding
 def zscore_filter(times, voltages, threshold=2.0):
-    # Compute Z-scores for each voltage value (how many standard deviations each point is from the mean)
+    # Filters voltage outliers using the Z-score method.
+    # Points with Z-scores exceeding a threshold are removed.
     z_scores = zscore(voltages)
-
-    # Create a mask that keeps only values within the threshold (e.g., |Z| < 2.0)
     mask = np.abs(z_scores) < threshold
-
-    # Calculate how many points will be removed by the filter
     removed_count = len(mask) - np.sum(mask)
-
-    # Print how many points were considered outliers
     print(f"Z-score filtering removed {removed_count} amplitude outlier points")
-
-    # Apply the mask to both time and voltage arrays to keep only inliers
     filtered_times = times[mask]
     filtered_voltages = voltages[mask]
-
-    # Return the cleaned time and voltage arrays
     return filtered_times, filtered_voltages
 
-
 def compute_adaptive_jump_threshold(voltages, percentile=99):
-    # Calculate the absolute difference between each consecutive voltage value
+    # Computes a threshold for detecting sudden voltage jumps (spikes).
+    # The threshold is based on a high percentile of the absolute differences between successive voltage points.
     diffs = np.abs(np.diff(voltages))
-
-    # Compute a threshold for what constitutes a "large jump" using the 99th percentile
-    # This is useful for detecting sudden spikes or artifacts in noisy ECG signals
-
     return np.percentile(diffs, percentile)
 
 def compute_sliding_hrv_with_peaks(times, r_peaks, fs=2000, window_sec=4, step_sec=1):
-    """
-    Computes HRV (SDNN in ms) in a sliding window using precomputed R-peaks.
-
-    Parameters:
-        times       : np.array of time values in seconds
-        r_peaks     : np.array of indices corresponding to R-peaks in `times`
-        fs          : Sampling frequency (Hz), default 2000
-        window_sec  : Duration of each window for HRV calculation (sec), default 4s
-        step_sec    : Step size between windows (sec), default 1s
-
-    Returns:
-        time_stamps : Center time of each window (s)
-        hrv_values  : SDNN values in milliseconds (ms)
-    """
-
-    r_times = times[r_peaks]  # Convert indices to time
-
+    # Computes sliding window HRV (SDNN) values across the ECG signal.
+    # This helps in observing how HRV changes over time.
+    r_times = times[r_peaks]
     hrv_values = []
     time_stamps = []
-
     start_time = times[0]
     end_time = times[-1]
-
     window_start = start_time
     while window_start + window_sec <= end_time:
         window_end = window_start + window_sec
-
-        # Get RR intervals within this window
+        # Filters R-peak times within the current sliding window.
         mask = (r_times >= window_start) & (r_times <= window_end)
         rr_window = np.diff(r_times[mask])
-
-        # Keep only RR intervals in physiological range (60–200 ms = 0.06–0.2 s)
+        # Filters valid RR intervals within the window.
         valid_rr = rr_window[(rr_window > 0.06) & (rr_window < 0.2)]
-
         if len(valid_rr) >= 2:
-            sdnn_ms = np.std(valid_rr) * 1000  # Convert SDNN to milliseconds
+            sdnn_ms = np.std(valid_rr) * 1000 # SDNN in milliseconds.
             hrv_values.append(sdnn_ms)
-            time_stamps.append(window_start + window_sec / 2)
-
+            time_stamps.append(window_start + window_sec / 2) # Mid-point of the window.
         window_start += step_sec
-
     return time_stamps, hrv_values
 
-
 def compute_and_plot_sliding_hr_difference(times, r_peaks, fs=2000, window_sec=4, step_sec=1, title="Sliding HR Change"):
-    """
-    Computes the average HR in a sliding window and plots the change in heart rate over time.
-    """
-
+    # Computes and plots the change in heart rate (ΔHR) over time using a sliding window.
+    # This can highlight periods of significant HR fluctuations.
     r_times = times[r_peaks]
     window_starts = []
     hr_values = []
-
     start_time = times[0]
     end_time = times[-1]
-
     current_start = start_time
     while current_start + window_sec <= end_time:
         current_end = current_start + window_sec
-
-        # Get RR intervals in this window
+        # Filters R-peak times within the current sliding window.
         mask = (r_times >= current_start) & (r_times <= current_end)
         rr_window = np.diff(r_times[mask])
+        # Filters valid RR intervals within the window.
         valid_rr = rr_window[(rr_window > 0.06) & (rr_window < 0.2)]
-
         if len(valid_rr) >= 1:
             mean_rr = np.mean(valid_rr)
-            hr = 60 / mean_rr  # Convert to bpm
+            hr = 60 / mean_rr # Calculates HR for the window.
             hr_values.append(hr)
-            window_starts.append(current_start + window_sec / 2)
-
+            window_starts.append(current_start + window_sec / 2) # Mid-point of the window.
         current_start += step_sec
-
-    # Compute HR differences
+    # Calculates the difference in HR between consecutive windows.
     delta_hr = np.diff(hr_values)
-    delta_times = window_starts[1:]  # Align with difference values
-
-    # Plot
+    delta_times = window_starts[1:] # Time points corresponding to delta_hr.
+    # Plots the sliding HR difference.
     plt.figure(figsize=(10, 4))
     plt.plot(delta_times, delta_hr, marker='o', linestyle='-', color='teal')
-    plt.axhline(0, color='gray', linestyle='--')
+    plt.axhline(0, color='gray', linestyle='--') # Adds a horizontal line at y=0 for reference.
     plt.xlabel("Time (s)")
     plt.ylabel("ΔHR (bpm)")
     plt.title(title)
     plt.grid(True)
     plt.tight_layout()
     plt.show()
-
     return delta_times, delta_hr
 
-
 def plot_ecg_correlation(software_data):
-    """
-    Plots HR and HRV comparisons and correlation between ECGenie software and filtered pipeline.
-    Accepts a dictionary of dictionaries with each file's results.
-    """
-
-    # Print the full data dictionary for debugging
+    # Plots correlation between ECGenie software calculated HR/HRV and algorithm calculated HR/HRV.
+    # Helps in validating the algorithm's performance against a known tool.
     print(software_data)
-
-    # Extract the filenames (keys) from the data dictionary
     filenames = list(software_data.keys())
     print(filenames)
 
-    # Extract values for ECGenie HR and HRV
-    ecg_hr = [software_data[f]["HR"] for f in filenames]
-    ecg_hrv = [software_data[f]["HRV"] for f in filenames]
+    if not filenames:
+        print("No data available for correlation plots. Skipping.")
+        return
 
-    # Extract values for filtered HR and HRV
-    data_hr = [software_data[f]["Filtered HR"] for f in filenames]
-    data_hrv = [software_data[f]["Filtered HRV"] for f in filenames]
+    # Extracts HR and HRV values from ECGenie and the algorithm's filtered data.
+    ecg_hr = [software_data[f]["HR"] for f in filenames if "HR" in software_data[f] and software_data[f]["HR"] is not None]
+    ecg_hrv = [software_data[f]["HRV"] for f in filenames if "HRV" in software_data[f] and software_data[f]["HRV"] is not None]
+    data_hr = [software_data[f]["Filtered HR"] for f in filenames if "Filtered HR" in software_data[f] and software_data[f]["Filtered HR"] is not None]
+    data_hrv = [software_data[f]["Filtered HRV"] for f in filenames if "Filtered HRV" in software_data[f] and software_data[f]["Filtered HRV"] is not None]
 
-    # Create x-axis indices for plotting
+    # Checks if there is enough valid data for plotting and correlation.
+    if not (len(ecg_hr) > 1 and len(data_hr) > 1 and len(ecg_hrv) > 1 and len(data_hrv) > 1):
+        print("Not enough valid data points for correlation plots. Skipping.")
+        return
+
     indices = np.arange(len(filenames))
+    plt.figure(figsize=(12, 5))
 
-    # Part 1: Comparison Scatter Plots
-    plt.figure(figsize=(12, 5))  # Create a figure with two subplots side-by-side
-
-    # Subplot 1: Compare heart rate (HR)
+    # Plot for Heart Rate Comparison (scatter plot against file index).
     plt.subplot(1, 2, 1)
     plt.scatter(indices, ecg_hr, color='blue', label='ECGenie HR (bpm)', marker='o')
     plt.scatter(indices, data_hr, color='green', label='Filtered HR (bpm)', marker='x')
@@ -390,7 +267,7 @@ def plot_ecg_correlation(software_data):
     plt.legend()
     plt.grid(True)
 
-    # Subplot 2: Compare heart rate variability (HRV)
+    # Plot for HRV Comparison (scatter plot against file index).
     plt.subplot(1, 2, 2)
     plt.scatter(indices, ecg_hrv, color='blue', label='ECGenie HRV (bpm)', marker='o')
     plt.scatter(indices, data_hrv, color='green', label='Filtered HRV (bpm)', marker='x')
@@ -400,33 +277,33 @@ def plot_ecg_correlation(software_data):
     plt.legend()
     plt.grid(True)
 
-    plt.tight_layout()  # Prevent overlap between subplots
+    plt.tight_layout()
     plt.show()
 
-    # Part 2: Correlation Scatter Plots
-
-    # Compute Pearson correlation coefficients for HR and HRV
-    corr_hr = np.corrcoef(ecg_hr, data_hr)[0, 1]
-    corr_hrv = np.corrcoef(ecg_hrv, data_hrv)[0, 1]
+    # Compute Pearson correlation coefficients for HR and HRV.
+    corr_hr = pearsonr(ecg_hr, data_hr)[0]
+    corr_hrv = pearsonr(ecg_hrv, data_hrv)[0]
 
     plt.figure(figsize=(12, 5))
 
-    # Subplot 1: HR correlation plot
+    # Plot for HR Correlation (scatter plot of ECGenie HR vs. Filtered HR).
     plt.subplot(1, 2, 1)
     plt.scatter(ecg_hr, data_hr, color='blue', alpha=0.7)
-    min_val, max_val = min(min(ecg_hr), min(data_hr)), max(max(ecg_hr), max(data_hr))
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal Line')  # Reference line
+    min_val = min(min(ecg_hr), min(data_hr))
+    max_val = max(max(ecg_hr), max(data_hr))
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal Line') # Ideal correlation line.
     plt.xlabel("ECGenie HR (bpm)")
     plt.ylabel("Filtered HR (bpm)")
     plt.title(f"HR Correlation (r = {corr_hr:.2f})")
     plt.grid(True)
     plt.legend()
 
-    # Subplot 2: HRV correlation plot
+    # Plot for HRV Correlation (scatter plot of ECGenie HRV vs. Filtered HRV).
     plt.subplot(1, 2, 2)
     plt.scatter(ecg_hrv, data_hrv, color='green', alpha=0.7)
-    min_val, max_val = min(min(ecg_hrv), min(data_hrv)), max(max(ecg_hrv), max(data_hrv))
-    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal Line')  # Reference line
+    min_val = min(min(ecg_hrv), min(data_hrv))
+    max_val = max(max(ecg_hrv), max(data_hrv))
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal Line') # Ideal correlation line.
     plt.xlabel("ECGenie HRV (bpm)")
     plt.ylabel("Filtered HRV (bpm)")
     plt.title(f"HRV Correlation (r = {corr_hrv:.2f})")
@@ -436,95 +313,237 @@ def plot_ecg_correlation(software_data):
     plt.tight_layout()
     plt.show()
 
-    # Print Pearson correlation values for both HR and HRV
     print(f"\nPearson correlation (HR): {corr_hr:.4f}")
     print(f"Pearson correlation (HRV): {corr_hrv:.4f}")
 
+def identify_qrs_complexes(times, voltages, r_peaks, fs=2000, search_window_sec=0.015, derivative_threshold_factor=0.5):
+    # Identifies the start and end points of QRS complexes around detected R-peaks.
+    # Uses the derivative of the ECG signal to find points where the slope changes significantly.
+    qrs_starts = []
+    qrs_ends = []
+    dt = 1.0 / fs
+    voltages_diff = np.diff(voltages) / dt # Calculate derivative of voltages.
+    # Determine a threshold for derivative to identify QRS boundaries.
+    derivative_threshold = np.max(np.abs(voltages_diff)) * derivative_threshold_factor
+    for r_peak_idx in r_peaks:
+        search_window_samples = int(search_window_sec * fs)
+        start_search = max(0, r_peak_idx - search_window_samples)
+        end_search = min(len(voltages) - 1, r_peak_idx + search_window_samples)
+        qrs_start = None
+        # Search backward from R-peak to find QRS onset.
+        for i in range(r_peak_idx, start_search, -1):
+            if i - 1 >= 0 and np.abs(voltages_diff[i - 1]) < derivative_threshold:
+                qrs_start = i
+                break
+        if qrs_start is None:
+            qrs_start = start_search # Default to start of search window if no clear onset found.
+        qrs_end = None
+        # Search forward from R-peak to find QRS offset.
+        for i in range(r_peak_idx, end_search):
+            if i < len(voltages_diff) and np.abs(voltages_diff[i]) < derivative_threshold:
+                qrs_end = i
+                break
+        if qrs_end is None:
+            qrs_end = end_search # Default to end of search window if no clear offset found.
+        qrs_starts.append(qrs_start)
+        qrs_ends.append(qrs_end)
+    return np.array(qrs_starts), np.array(qrs_ends)
 
+def find_p_wave_timing(times, voltages, qrs_start_idx, fs=2000, p_wave_search_window_ms=(10, 60), prominence_factor=0.05, derivative_threshold_factor=0.05):
+    # Identifies the onset and offset of P-waves before each QRS complex.
+    # This is crucial for calculating PR and PQ intervals.
+    p_onset_idx = None
+    p_offset_idx = None
+    # Define search window for P-wave relative to QRS onset.
+    min_samples_before_qrs = int(p_wave_search_window_ms[0] / 1000 * fs)
+    max_samples_before_qrs = int(p_wave_search_window_ms[1] / 1000 * fs)
 
+    start_search_p = max(0, qrs_start_idx - max_samples_before_qrs)
+    end_search_p = min(len(voltages), qrs_start_idx - min_samples_before_qrs)
 
+    if end_search_p <= start_search_p:
+        return None, None # No valid search window for P-wave.
+
+    # Extract segment for P-wave analysis.
+    p_wave_segment_voltages = voltages[start_search_p:end_search_p]
+    p_wave_segment_times = times[start_search_p:end_search_p]
+
+    if len(p_wave_segment_voltages) == 0:
+        return None, None
+
+    # Determine prominence for P-wave peak detection.
+    prominence_threshold = np.max(np.abs(p_wave_segment_voltages)) * prominence_factor
+    # Find potential P-wave peaks (positive or negative).
+    p_peaks, _ = find_peaks(p_wave_segment_voltages, prominence=prominence_threshold, distance=int(0.01 * fs))
+    if len(p_peaks) == 0:
+        p_peaks, _ = find_peaks(-p_wave_segment_voltages, prominence=prominence_threshold, distance=int(0.01 * fs))
+        if len(p_peaks) == 0:
+            return None, None # No P-wave peak found.
+
+    # Identify the most prominent P-wave peak in the segment.
+    p_peak_local_idx = p_peaks[np.argmax(np.abs(p_wave_segment_voltages[p_peaks]))]
+    p_peak_global_idx = start_search_p + p_peak_local_idx
+
+    dt = 1.0 / fs
+    voltages_diff = np.diff(voltages) / dt # Calculate derivative for P-wave boundaries.
+    max_abs_diff = np.max(np.abs(voltages_diff[start_search_p:qrs_start_idx])) if qrs_start_idx > start_search_p else 0
+    if max_abs_diff == 0: return None, None
+    derivative_threshold = max_abs_diff * derivative_threshold_factor
+
+    # Search backward from P-peak to find P-wave onset.
+    for i in range(p_peak_global_idx, start_search_p, -1):
+        if i < len(voltages_diff) and np.abs(voltages_diff[i-1]) < derivative_threshold:
+            potential_onset = i
+            if potential_onset < p_peak_global_idx:
+                p_onset_idx = potential_onset
+                break
+    if p_onset_idx is None: p_onset_idx = start_search_p # Default if onset not found.
+
+    # Search forward from P-peak to find P-wave offset.
+    baseline_voltage_at_qrs_onset = voltages[qrs_start_idx] # Reference baseline.
+    for i in range(p_peak_global_idx, qrs_start_idx):
+        if i < len(voltages_diff) and np.abs(voltages_diff[i]) < derivative_threshold and np.abs(voltages[i] - baseline_voltage_at_qrs_onset) < np.max(np.abs(p_wave_segment_voltages)) * 0.1:
+            p_offset_idx = i
+            break
+    if p_offset_idx is None: p_offset_idx = qrs_start_idx -1 # Default if offset not found.
+
+    return p_onset_idx, p_offset_idx
+
+def calculate_pr_intervals(times, qrs_starts, p_wave_onsets):
+    # Calculates the PR interval, defined as the duration from the start of the P-wave to the start of the QRS complex.
+    pr_intervals = []
+    min_len = min(len(qrs_starts), len(p_wave_onsets))
+    for i in range(min_len):
+        if p_wave_onsets[i] is not None and qrs_starts[i] is not None:
+            # Ensure P-wave onset precedes QRS start and both indices are valid.
+            if 0 <= p_wave_onsets[i] < len(times) and 0 <= qrs_starts[i] < len(times) and times[p_wave_onsets[i]] < times[qrs_starts[i]]:
+                pr_interval = times[qrs_starts[i]] - times[p_wave_onsets[i]]
+                if pr_interval > 0:
+                    pr_intervals.append(pr_interval)
+    return np.array(pr_intervals)
+
+def calculate_pq_intervals(times, qrs_starts, p_wave_offsets):
+    # Calculates the PQ interval, defined as the duration from the end of the P-wave to the start of the QRS complex.
+    pq_intervals = []
+    min_len = min(len(qrs_starts), len(p_wave_offsets))
+    for i in range(min_len):
+        if p_wave_offsets[i] is not None and qrs_starts[i] is not None:
+            # Ensure P-wave offset precedes QRS start and both indices are valid.
+            if 0 <= p_wave_offsets[i] < len(times) and 0 <= qrs_starts[i] < len(times) and times[p_wave_offsets[i]] < times[qrs_starts[i]]:
+                pq_interval = times[qrs_starts[i]] - times[p_wave_offsets[i]]
+                if pq_interval > 0:
+                    pq_intervals.append(pq_interval)
+    return np.array(pq_intervals)
 
 def process_ecg_file(file_path, output_folder, jump_threshold=0.5,
                      std_thresh_low=0.02, std_thresh_high=0.8):
-    # Main function to clean ECG signal, compute HRV, and return filtered results.
+    # Main function to process a single ECG file, apply filtering, calculate HRV, and save results.
 
-    # Create image folder and name for output
+    # Create a folder for filtered data images if it doesn't exist.
     image_folder = os.path.join(output_folder, "Filtered Data Images")
     os.makedirs(image_folder, exist_ok=True)
     base_filename = os.path.splitext(os.path.basename(file_path))[0]
 
-    # Load ECG signal from file
+    # Open original ECG data.
     times, voltages = open_ecg_data(file_path)
     print(f"Original signal length: {len(voltages)} points")
 
-    # Dynamically calculate jump threshold based on the 99th percentile of voltage differences
+    # Compute an adaptive jump threshold based on voltage differences.
     jump_threshold = compute_adaptive_jump_threshold(voltages, percentile=99)
 
-    # --- Step 1: Remove extreme amplitude outliers (greater than ±5 mV) =
-    voltage_mask = np.abs(voltages) <= 5  # Keep voltages within a safe physiological range
-    times_no_outliers = times[voltage_mask]  # Filter time array accordingly
-    voltages_no_outliers = voltages[voltage_mask]  # Filter voltage array
-    print(f"Removed {len(voltages) - len(voltages_no_outliers)} outlier points (> ±5 mV)")
+    # Remove amplitude outliers (voltages > +/- 5mV).
+    voltage_mask = np.abs(voltages) <= 5
+    times_no_outliers = times[voltage_mask]
+    voltages_no_outliers = voltages[voltage_mask]
+    print(f"Removed {len(voltages) - len(voltages_no_outliers)} outlier points (> \u00b15 mV)")
 
-    # --- Step 2: Remove abrupt spikes in the signal
-    diffs = np.abs(np.diff(voltages_no_outliers))  # Calculate point-to-point voltage jumps
-    smooth_mask = np.insert(diffs < jump_threshold, 0, True)  # Keep points with smooth transitions
-    times_cleaned = times_no_outliers[smooth_mask]  # Filtered time array
-    voltages_cleaned = voltages_no_outliers[smooth_mask]  # Filtered voltage array
+    # Remove spike points based on sudden voltage jumps.
+    diffs = np.abs(np.diff(voltages_no_outliers))
+    smooth_mask = np.insert(diffs < jump_threshold, 0, True) # Keep points where difference is below threshold.
+    times_cleaned = times_no_outliers[smooth_mask]
+    voltages_cleaned = voltages_no_outliers[smooth_mask]
     print(f"Removed {len(voltages_no_outliers) - len(voltages_cleaned)} spike points (>{jump_threshold} mV jumps)")
 
-    # --- Step 3: Automatically detect abnormal regions (e.g., flatline, noise) and remove them =
+    # Detect and consolidate abnormal segments (e.g., noisy periods).
     abnormal_times_raw, _ = detect_abnormal_segments(times_cleaned, voltages_cleaned)
     abnormal_times = consolidate_abnormal_segments(abnormal_times_raw, merge_distance=1.0)
 
-    # Create a mask that excludes abnormal regions ±0.5s around detected anomalies
+    # Create a mask to remove the identified abnormal segments.
     mask = np.ones(len(times_cleaned), dtype=bool)
     for t_ab in abnormal_times:
-        mask &= ~((times_cleaned >= t_ab - 0.5) & (times_cleaned <= t_ab + 0.5))
-    times_auto_filtered = times_cleaned[mask]  # Apply the mask to time
-    voltages_auto_filtered = voltages_cleaned[mask]  # Apply the mask to voltage
+        mask &= ~((times_cleaned >= t_ab - 0.5) & (times_cleaned <= t_ab + 0.5)) # Remove 1-second window around abnormal point.
+    times_auto_filtered = times_cleaned[mask]
+    voltages_auto_filtered = voltages_cleaned[mask]
     print(f"Auto-removed {len(voltages_cleaned) - len(voltages_auto_filtered)} abnormal points from {len(abnormal_times)} segments")
 
-    # --- Step 4: Apply z-score filtering to remove amplitude outliers
+    # Apply a first Z-score filter on the auto-filtered data.
     times_auto_filtered, voltages_auto_filtered = zscore_filter(times_auto_filtered, voltages_auto_filtered)
 
-    # --- Step 5: Shift data to remove gaps and reindex time from zero ---
+    # Shift and shorten the signal (remove zeros and re-index time).
     times_filtered, voltages_filtered = shift_and_shorten(times_auto_filtered, voltages_auto_filtered)
 
-    # --- Step 6: Optional second z-score filtering for extra refinement ---
+    # Apply a second Z-score filter on the concatenated data for final cleaning.
     times_z_con, voltages_z_con = zscore_filter(times_filtered, voltages_filtered)
+    final_times = times_z_con
+    final_voltages = voltages_z_con
 
-    # --- Step 7: Run HRV and heart rate calculations on all four stages of data ---
-    sdnn_before, rr_before, peaks_before, hr_bpm_before, pnn50_before = calculate_hrv(times, voltages)  # Raw signal
-    sdnn_after, rr_after, peaks_after, hr_bpm_after, pnn50_after = calculate_hrv(times_auto_filtered, voltages_auto_filtered)  # After abnormal removal
-    sdnn_con, rr_con, peaks_con, hr_bpm_con, pnn50_con = calculate_hrv(times_filtered, voltages_filtered)  # After reindexing
-    sdnn_z_con, rr_z_con, peaks_z_con, hr_bpm_z_con, pnn50_z_con = calculate_hrv(times_z_con, voltages_z_con)  # After 2nd z-score
+    # Calculate HRV parameters at different stages of filtering for comparison.
+    sdnn_before, rmssd_before, rr_before_arr, peaks_before, hr_bpm_before, pnn50_before = calculate_hrv(times, voltages)
+    sdnn_after, rmssd_after, rr_after_arr, peaks_after, hr_bpm_after, pnn50_after = calculate_hrv(times_auto_filtered, voltages_auto_filtered)
+    sdnn_con, rmssd_con, rr_con_arr, peaks_con, hr_bpm_con, pnn50_con = calculate_hrv(times_filtered, voltages_filtered)
+    sdnn_z_con, rmssd_z_con, rr_z_con_arr, peaks_z_con, hr_bpm_z_con, pnn50_z_con = calculate_hrv(final_times, final_voltages)
 
+    # Calculate mean RR interval for the final filtered data.
+    mean_rr_con = np.mean(rr_z_con_arr) if rr_z_con_arr is not None and len(rr_z_con_arr) > 0 else None
 
-    # --- Final Analysis & Plotting Section ---
+    # Identify QRS complexes, P-wave onsets/offsets for morphological analysis.
+    if peaks_z_con is not None and len(peaks_z_con) > 0:
+        qrs_starts, qrs_ends = identify_qrs_complexes(final_times, final_voltages, peaks_z_con)
+    else:
+        qrs_starts = np.array([])
+        qrs_ends = np.array([])
 
-    # Calculate the average RR interval from the concatenated signal (used as HRV summary)
-    rr_mean = np.mean(rr_con) if rr_con is not None and len(rr_con) > 0 else None
+    all_p_onsets = []
+    all_p_offsets = []
+    for qrs_start_idx in qrs_starts:
+        p_onset, p_offset = find_p_wave_timing(final_times, final_voltages, qrs_start_idx)
+        all_p_onsets.append(p_onset)
+        all_p_offsets.append(p_offset)
 
-    # --- Dynamic Y-axis Scaling ---
-    # Compute mean and standard deviation of voltage to define plot range
-    mean_amp = np.mean(voltages)          # Average voltage
-    std_amp = np.std(voltages)            # Signal variability
-    plot_range = (mean_amp - 3 * std_amp, mean_amp + 3 * std_amp)  # Y-limits = mean ± 3 std
+    # Filter out None values from P-wave detections to get valid indices.
+    valid_p_onsets_indices = np.array([p_idx for p_idx in all_p_onsets if p_idx is not None])
+    valid_qrs_starts_for_pr = np.array([qrs_starts[i] for i, p_idx in enumerate(all_p_onsets) if p_idx is not None])
+    valid_p_offsets_indices = np.array([p_idx for p_idx in all_p_offsets if p_idx is not None])
+    valid_qrs_starts_for_pq = np.array([qrs_starts[i] for i, p_idx in enumerate(all_p_offsets) if p_idx is not None])
 
+    # Calculate PR and PQ intervals.
+    pr_intervals = calculate_pr_intervals(final_times, valid_qrs_starts_for_pr, valid_p_onsets_indices)
+    pq_intervals = calculate_pq_intervals(final_times, valid_qrs_starts_for_pq, valid_p_offsets_indices)
+
+    # Calculate average QRS duration, PR interval, and PQ interval.
+    avg_qrs_duration = np.mean(final_times[qrs_ends] - final_times[qrs_starts]) if len(qrs_starts) > 0 and len(qrs_ends) == len(qrs_starts) else None
+    avg_pr_interval = np.mean(pr_intervals) if len(pr_intervals) > 0 else None
+    avg_pq_interval = np.mean(pq_intervals) if len(pq_intervals) > 0 else None
+
+    # Prepare plotting range for consistent visualization.
+    mean_amp = np.mean(voltages)
+    std_amp = np.std(voltages)
+    plot_range = (mean_amp - 3 * std_amp, mean_amp + 3 * std_amp)
+
+    # Create a multi-panel plot to visualize the ECG signal at different processing stages.
     fig, axs = plt.subplots(5, 1, figsize=(20, 20))
 
-    # --- Plot 1: Original ECG ---
-    axs[0].plot(times, voltages, color='blue', linewidth=0.2)  # Raw voltage trace
+    # Plot 1: Original ECG Data.
+    axs[0].plot(times, voltages, color='blue', linewidth=0.2)
     if peaks_before is not None:
-        axs[0].plot(times[peaks_before], voltages[peaks_before], 'ro', label="R-peaks", markersize=4)  # Mark R-peaks
+        axs[0].plot(times[peaks_before], voltages[peaks_before], 'ro', label="R-peaks", markersize=4)
     axs[0].set_title("Original ECG Data")
     axs[0].set_xlabel("Time (s)")
     axs[0].set_ylabel("Voltage (mV)")
-    axs[0].set_ylim(plot_range)  # Set consistent vertical range
+    axs[0].set_ylim(plot_range)
     axs[0].grid(True)
 
-    # --- Plot 2: Auto-Filtered ECG ---
+    # Plot 2: ECG after auto-filtering abnormal segments.
     axs[1].plot(times_auto_filtered, voltages_auto_filtered, color='blue', linewidth=0.2)
     if peaks_after is not None:
       axs[1].plot(times_auto_filtered[peaks_after], voltages_auto_filtered[peaks_after], 'ro', label="R-peaks", markersize=4)
@@ -534,31 +553,31 @@ def process_ecg_file(file_path, output_folder, jump_threshold=0.5,
     axs[1].set_ylim(plot_range)
     axs[1].grid(True)
 
-    # --- Plot 3: Concatenated ECG (Zeros Removed & Reindexed Time) ---
+    # Plot 3: Concatenated ECG (zeros removed and time reindexed).
     axs[2].plot(times_filtered, voltages_filtered, color='blue', linewidth=0.2)
     if peaks_con is not None:
         axs[2].plot(times_filtered[peaks_con], voltages_filtered[peaks_con], 'ro', label="R-peaks", markersize=4)
     axs[2].set_title("Concatenated ECG (Zeros Removed & Time Reindexed)")
     axs[2].set_xlabel("Time (s)")
     axs[2].set_ylabel("Voltage (mV)")
-    axs[2].set_ylim(plot_range)  # Fixed range for comparing across recordings
+    axs[2].set_ylim(plot_range)
     axs[2].grid(True)
 
-    # --- Plot 4: After Second Z-score Filtering ---
-    axs[3].plot(times_z_con, voltages_z_con, color='blue', linewidth=0.2)
+    # Plot 4: Final ECG signal after the second Z-score filtering.
+    axs[3].plot(final_times, final_voltages, color='blue', linewidth=0.2)
     if peaks_z_con is not None:
-        axs[3].plot(times_z_con[peaks_z_con], voltages_z_con[peaks_z_con], 'ro', label="R-peaks", markersize=2)
-    axs[3].set_title("2nd Z-score Filtering on concatenated data")
+        axs[3].plot(final_times[peaks_z_con], final_voltages[peaks_z_con], 'ro', label="R-peaks", markersize=2)
+    axs[3].set_title("2nd Z-score Filtering on concatenated data (Final Signal)")
     axs[3].set_xlabel("Time (s)")
     axs[3].set_ylabel("Voltage (mV)")
     axs[3].set_ylim(plot_range)
     axs[3].grid(True)
 
-    # --- Plot 5: Sliding HRV ---
-    if times_filtered is not None and peaks_con is not None:
-        time_stamps, hrv_values = compute_sliding_hrv_with_peaks(times_filtered, peaks_con)
+    # Plot 5: Sliding HRV (SDNN) over time for the final signal.
+    if final_times is not None and peaks_z_con is not None:
+        time_stamps, hrv_values = compute_sliding_hrv_with_peaks(final_times, peaks_z_con)
         axs[4].plot(time_stamps, hrv_values, color='purple', label="Sliding HRV (SDNN)")
-        axs[4].set_title("Sliding HRV")
+        axs[4].set_title("Sliding HRV (SDNN in ms)")
         axs[4].set_xlabel("Time (s)")
         axs[4].set_ylabel("HRV (ms)")
         axs[4].grid(True)
@@ -568,119 +587,104 @@ def process_ecg_file(file_path, output_folder, jump_threshold=0.5,
         axs[4].set_ylabel("HRV (ms)")
         axs[4].grid(True)
 
-
-    # Export image layout to Folder titled "Filter Data Images" as jpg
+    # Save the summary plot and display it.
     output_img_path = os.path.join(image_folder, f"{base_filename}_summary.jpg")
     plt.tight_layout()
     plt.savefig(output_img_path, dpi=300)
     plt.show()
-    plt.close()
 
-    # # Generate the hrv_sliding plot (but do not close it yet)
-    # time_stamps, hrv_values = compute_sliding_hrv_with_peaks(times_filtered, peaks_con)
-    # plt.figure(figsize=(10, 4))
-    # plt.plot(time_stamps, hrv_values, color='purple', label="Sliding HRV (SDNN)")
-    # plt.xlabel("Time (s)")
-    # plt.ylabel("HRV (ms)")
-    # plt.title(f"{base_filename} - Sliding HRV")
-    # plt.grid(True)
-    # plt.tight_layout()
-
-    # # Save to PDF if writer is provided
-    # if sliding_hrv_pdf is not None:
-    #     sliding_hrv_pdf.savefig()  # Adds the current figure to the PDF
-    #     plt.close()
-    # else:
-    #     plt.show()
-
-    # Plot HR difference across sliding windows
-    if times_filtered is not None and peaks_con is not None:
-      compute_and_plot_sliding_hr_difference(times_filtered, peaks_con, title=f"{base_filename} - Sliding HR Difference")
+    # Compute and plot sliding HR difference for the final signal.
+    if final_times is not None and peaks_z_con is not None:
+      compute_and_plot_sliding_hr_difference(final_times, peaks_z_con, title=f"{base_filename} - Sliding HR Difference")
     else:
       print("❌ Not enough data to plot Sliding HR Difference.")
 
-
-    # Plot histogram of RR intervals at each filtering step
-    plt.figure(figsize=(12, 6)) # Create a new figure for the histogram
-    plt.subplot(1, 2, 2)  # Create second subplot for histogram
-
-    # Plot step histogram of RR intervals before any filtering
-    if rr_before is not None:
-        plt.hist(rr_before, bins=50, histtype='step', linewidth=1.8, label="Before", color='gray')
-
-    # Plot RR intervals after auto-filtering (removal of abnormal segments)
-    if rr_after is not None:
-        plt.hist(rr_after, bins=50, histtype='step', linewidth=1.8, label="After Filtering", color='blue')
-
-    # Plot RR intervals after zero-removal and time reindexing (concatenation)
-    if rr_con is not None:
-        plt.hist(rr_con, bins=50, histtype='step', linewidth=1.8, label="After con", color='orange')
-
-    # Plot RR intervals after second z-score filtering applied to concatenated signal
-    if rr_z_con is not None:
-        plt.hist(rr_z_con, bins=50, histtype='step', linewidth=1.8, label="After z con", color='red')
-
-
-    # Final histogram formatting
+    # Plot histogram of RR intervals at different filtering stages.
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 2)
+    if rr_before_arr is not None:
+        plt.hist(rr_before_arr, bins=50, histtype='step', linewidth=1.8, label="Before", color='gray')
+    if rr_after_arr is not None:
+        plt.hist(rr_after_arr, bins=50, histtype='step', linewidth=1.8, label="After Filtering", color='blue')
+    if rr_con_arr is not None:
+        plt.hist(rr_con_arr, bins=50, histtype='step', linewidth=1.8, label="After con", color='orange')
+    if rr_z_con_arr is not None:
+        plt.hist(rr_z_con_arr, bins=50, histtype='step', linewidth=1.8, label="After z con", color='red')
     plt.title("Histogram of RR Intervals")
     plt.xlabel("RR Interval (s)")
     plt.ylabel("Frequency")
     plt.legend()
     plt.grid(True)
-    plt.show() # Display the histogram plot
+    plt.show()
 
+    # Format and print HRV and HR metrics for different filtering stages.
+    sdnn_before_str = f"{sdnn_before:.4f}s" if sdnn_before is not None else "N/A"
+    rmssd_before_str = f"{rmssd_before:.4f}s" if rmssd_before is not None else "N/A"
+    hr_bpm_before_str = f"{hr_bpm_before:.2f}" if hr_bpm_before is not None else "N/A"
+    pnn50_before_str = f"{pnn50_before:.2f}%" if pnn50_before is not None else "N/A"
 
-    # --- Print out summary of HRV, HR, and detected R-peaks at each stage ---
-    print(f"Before filtering: HRV: {sdnn_before}, BPM: {hr_bpm_before}, R-peaks: {len(peaks_before) if peaks_before is not None else 0}, pNN50: {pnn50_before}")
-    print(f"After auto-filtering: HRV: {sdnn_after}, BPM: {hr_bpm_after}, R-peaks: {len(peaks_after) if peaks_after is not None else 0}, pNN50: {pnn50_after}")
-    print(f"After concatenation: HRV: {sdnn_con}, BPM: {hr_bpm_con}, R-peaks: {len(peaks_con) if peaks_con is not None else 0}, pNN50: {pnn50_con}")
-    print(f"After 2nd z-score on concatenation: HRV: {sdnn_z_con}, BPM: {hr_bpm_z_con}, R-peaks: {len(peaks_z_con) if peaks_z_con is not None else 0}, pNN50: {pnn50_z_con}")
+    sdnn_after_str = f"{sdnn_after:.4f}s" if sdnn_after is not None else "N/A"
+    rmssd_after_str = f"{rmssd_after:.4f}s" if rmssd_after is not None else "N/A"
+    hr_bpm_after_str = f"{hr_bpm_after:.2f}" if hr_bpm_after is not None else "N/A"
+    pnn50_after_str = f"{pnn50_after:.2f}%" if pnn50_after is not None else "N/A"
 
+    sdnn_con_str = f"{sdnn_con:.4f}s" if sdnn_con is not None else "N/A"
+    rmssd_con_str = f"{rmssd_con:.4f}s" if rmssd_con is not None else "N/A"
+    hr_bpm_con_str = f"{hr_bpm_con:.2f}" if hr_bpm_con is not None else "N/A"
+    pnn50_con_str = f"{pnn50_con:.2f}%" if pnn50_con is not None else "N/A"
 
-    # --- Save filtered ECG signal to text file ---
-    os.makedirs(output_folder, exist_ok=True)  # Create output folder if it doesn't exist
-    output_filename = os.path.basename(file_path).replace('.txt', '_filtered.txt')  # Modify original filename
-    output_path = os.path.join(output_folder, output_filename)  # Full output path
+    sdnn_z_con_str = f"{sdnn_z_con:.4f}s" if sdnn_z_con is not None else "N/A"
+    rmssd_z_con_str = f"{rmssd_z_con:.4f}s" if rmssd_z_con is not None else "N/A"
+    hr_bpm_z_con_str = f"{hr_bpm_z_con:.2f}" if hr_bpm_z_con is not None else "N/A"
+    pnn50_z_con_str = f"{pnn50_z_con:.2f}%" if pnn50_z_con is not None else "N/A"
 
-    # Write filtered ECG data to file
-    if times_filtered is not None and voltages_filtered is not None:
+    print(f"Before filtering: SDNN: {sdnn_before_str}, RMSSD: {rmssd_before_str}, BPM: {hr_bpm_before_str}, R-peaks: {len(peaks_before) if peaks_before is not None else 0}, pNN50: {pnn50_before_str}")
+    print(f"After auto-filtering: SDNN: {sdnn_after_str}, RMSSD: {rmssd_after_str}, BPM: {hr_bpm_after_str}, R-peaks: {len(peaks_after) if peaks_after is not None else 0}, pNN50: {pnn50_after_str}")
+    print(f"After concatenation: SDNN: {sdnn_con_str}, RMSSD: {rmssd_con_str}, BPM: {hr_bpm_con_str}, R-peaks: {len(peaks_con) if peaks_con is not None else 0}, pNN50: {pnn50_con_str}")
+    print(f"After 2nd z-score on concatenation (Final): SDNN: {sdnn_z_con_str}, RMSSD: {rmssd_z_con_str}, BPM: {hr_bpm_z_con_str}, R-peaks: {len(peaks_z_con) if peaks_z_con is not None else 0}, pNN50: {pnn50_z_con_str}")
+
+    # Handle None values for printing formatted strings for morphological parameters.
+    avg_qrs_duration_str = f"{avg_qrs_duration:.4f}s" if avg_qrs_duration is not None else "N/A"
+    avg_pr_interval_str = f"{avg_pr_interval:.4f}s" if avg_pr_interval is not None else "N/A"
+    avg_pq_interval_str = f"{avg_pq_interval:.4f}s" if avg_pq_interval is not None else "N/A"
+
+    print(f"Average QRS Duration: {avg_qrs_duration_str}, Average PR Interval: {avg_pr_interval_str}, Average PQ Interval: {avg_pq_interval_str}")
+
+    # Save the final filtered ECG data to a new file.
+    os.makedirs(output_folder, exist_ok=True)
+    output_filename = os.path.basename(file_path).replace('.txt', '_filtered.txt')
+    output_path = os.path.join(output_folder, output_filename)
+    if final_times is not None and final_voltages is not None:
         with open(output_path, 'w') as f:
             f.write("Time\tVoltage\n")
-            for t, v in zip(times_filtered, voltages_filtered):
+            for t, v in zip(final_times, final_voltages):
                 f.write(f"{t:.6f}\t{v:.6f}\n")
-        print(f"Saved filtered file to: {output_path}")  # Confirm file save
+        print(f"Saved filtered file to: {output_path}")
     else:
-        print(f"❌ Not enough valid data to save filtered file for {filename}.")
+        print(f"❌ Not enough valid data to save filtered file for {base_filename}.")
 
-
-    # --- Return key results ---
+    # Calculate percentage of data removed.
     percent_removed = 100 * (1 - len(voltages_auto_filtered) / len(voltages)) if len(voltages) > 0 else None
-    return times_auto_filtered, voltages_auto_filtered, sdnn_con, rr_mean, hr_bpm_con, len(peaks_con) if peaks_con is not None else 0, percent_removed, pnn50_con
 
+    return final_times, final_voltages, sdnn_z_con, rmssd_z_con, mean_rr_con, hr_bpm_z_con, len(peaks_z_con) if peaks_z_con is not None else 0, percent_removed, pnn50_z_con, avg_qrs_duration, avg_pr_interval, avg_pq_interval
 
 def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
-    # Initialize containers for summary output and comparisons
-    summary_data = []          # Will store full summary table for output
-    ecg_hr, ecg_hrv = [], []   # Lists to collect HR and HRV from ECGenie
-    data_hr, data_hrv = [], [] # Lists to collect HR and HRV from processed data
+    # Orchestrates the processing of multiple ECG files and generates a summary CSV.
+    # Also compares algorithm results with ECGenie software outputs.
+    summary_data = []
+    ecg_hr, ecg_hrv = [], []
+    data_hr, data_hrv = [], []
 
-    # Construct full file paths to ECGenie output CSVs
+    # Define paths for ECGenie output files.
     software_path = os.path.join(data_folder_path, "ECGenie Outputs.csv")
     software_cut_path = os.path.join(data_folder_path, "ECGenie with Cuts.csv")
-    # sliding_hrv_pdf_path = os.path.join(output_folder_path, "All_Sliding_HRV_Plots.pdf")
-    # sliding_hrv_pdf = PdfPages(sliding_hrv_pdf_path)
+    cut_data = {}
+    software_data = {}
 
-
-    cut_data = {}        # Will hold ECGenie data that was manually edited
-    software_data = {}   # Will hold original ECGenie output data
-
-    # --- Load ECGenie original output (automated) ---
-    if os.path.exists(software_path):  # Check if the file exists
-        df_software = pd.read_csv(software_path)  # Load ECGenie original output CSV
-
-        # Check required columns exist in the DataFrame
+    # Load HR and HRV data from ECGenie automatic output.
+    if os.path.exists(software_path):
+        df_software = pd.read_csv(software_path)
         if "File" in df_software.columns and "HR(bpm)" in df_software.columns and "HRvar(bpm)" in df_software.columns:
-            # Iterate over each row and store HR and HRV in dictionary with file name as key
             for _, row in df_software.iterrows():
                 software_data[row["File"]] = {
                     "HR": row["HR(bpm)"],
@@ -691,13 +695,10 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
     else:
         print("❌ ECGenie output spreadsheet not found.")
 
-    # --- Load ECGenie output that includes manual cut segments ---
-    if os.path.exists(software_cut_path):  # Check if the cut version exists
-        df_software = pd.read_csv(software_cut_path)  # Load the cut version
-
-        # Check if necessary columns are available
+    # Load HR and HRV data from ECGenie manual cuts output.
+    if os.path.exists(software_cut_path):
+        df_software = pd.read_csv(software_cut_path)
         if "File" in df_software.columns and "HR(bpm)" in df_software.columns and "HRvar(bpm)" in df_software.columns:
-            # Store values from manual-cut ECGenie output
             for _, row in df_software.iterrows():
                 cut_data[row["File"]] = {
                     "HR": row["HR(bpm)"],
@@ -708,96 +709,907 @@ def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
     else:
         print("❌ ECGenie Manual Cuts output spreadsheet not found.")
 
-
+    # Iterate through all .txt files in the data folder (excluding already filtered ones).
     for filename in sorted(os.listdir(data_folder_path)):
-        # Only process raw ECG `.txt` files that are not already filtered or metric summary files
         if filename.endswith(".txt") and "_filtered" not in filename and "_metrics" not in filename:
             file_path = os.path.join(data_folder_path, filename)
             print(f"\nProcessing file: {filename}")
 
-            # Skip files that fail the basic format check (invalid or empty content)
+            # Check file format before processing.
             if not check_file_format(file_path):
                 print(f"⚠️ Skipping file due to format check failure: {filename}")
+                # Append entry with "Invalid Format" for skipped files.
                 summary_data.append({
                     "File": filename,
-                    "Mouse ID": "Invalid Format",   # Label invalid entries
+                    "Mouse ID": "Invalid Format",
                     "HR (BPM)": None,
                     "SDNN (s)": None,
+                    "RMSSD (s)": None,
                     "RR (s)": None,
                     "# of Signals": None,
-                    "pNN50 (%)": None
+                    "% Removed": None,
+                    "pNN50 (%)": None,
+                    "Avg QRS Duration (s)": None,
+                    "Avg PR Interval (s)": None,
+                    "Avg PQ Interval (s)": None
+
                 })
-                continue  # Skip to next file
+                continue
 
             try:
-                # Extract mouse ID or test label from the filename
+                # Extract mouse ID from filename.
                 parts = filename.replace(".txt", "").split("_")
                 mouse_id = "_".join(parts[1:]) if len(parts) > 1 else "Unknown"
 
-                # Process the ECG file: applies cleaning, filtering, and computes HR metrics
-                times_filtered, voltages_filtered, sdnn_con, mean_rr, hr_clean, signals, percent_removed, pnn50_con = process_ecg_file(
+                # Process the ECG file and get all calculated metrics.
+                times_filtered, voltages_filtered, sdnn_con, rmssd_con, mean_rr, hr_clean, signals, percent_removed, pnn50_con, avg_qrs_duration, avg_pr_interval, avg_pq_interval = process_ecg_file(
     file_path, output_folder_path)
 
-                # If ECGenie (automated) data exists and cleaned HRV/HR values are valid, update the entry
+                # Update software data dictionaries with filtered HR/HRV for correlation.
                 if filename in software_data and hr_clean is not None and sdnn_con is not None:
                     software_data[filename]["Filtered HR"] = hr_clean
                     software_data[filename]["Filtered HRV"] = sdnn_con
-
-                # If ECGenie data with manual cuts exists, also update that version with filtered metrics
                 if filename in cut_data and hr_clean is not None and sdnn_con is not None:
                     cut_data[filename]["Filtered HR"] = hr_clean
                     cut_data[filename]["Filtered HRV"] = sdnn_con
 
-
-                # Append computed values to the final summary table
+                # Append calculated metrics to the summary data list.
                 summary_data.append({
                     "File": filename,
                     "Mouse ID": mouse_id,
                     "HR (BPM)": hr_clean,
-                    "HRV (BPM)": sdnn_con,
+                    "SDNN (s)": sdnn_con,
+                    "RMSSD (s)": rmssd_con,
                     "RR (s)": mean_rr,
                     "# of Signals": signals,
                     "% Removed": percent_removed,
-                    "pNN50 (%)": pnn50_con
-                })
+                    "pNN50 (%)": pnn50_con,
+                    "Avg QRS Duration (s)": avg_qrs_duration,
+                    "Avg PR Interval (s)": avg_pr_interval,
+                    "Avg PQ Interval (s)": avg_pq_interval
 
+                })
             except Exception as e:
-                # Handle any unexpected errors during file processing
+                # Handle errors during file processing.
                 print(f"❌ Error processing {filename}: {e}")
                 summary_data.append({
                     "File": filename,
                     "Mouse ID": "Unknown",
                     "HR (BPM)": None,
-                    "HRV(s)": None,
+                    "SDNN (s)": None,
+                    "RMSSD (s)": None,
                     "RR (s)": None,
                     "# of Signals": None,
                     "% Removed": None,
-                    "pNN50 (%)": None
+                    "pNN50 (%)": None,
+                    "Avg QRS Duration (s)": None,
+                    "Avg PR Interval (s)": None,
+                    "Avg PQ Interval (s)": None
+
                 })
 
+    # Create a Pandas DataFrame from the summary data and save it to CSV.
+    summary_df = pd.DataFrame(summary_data)
+    df_summary = summary_df.sort_values(by="Mouse ID")
+    df_summary.to_csv(output_csv_path, index=False)
+    print(f"\n✅ ECG summary exported to: {output_csv_path}")
 
-    # Save all summary data to a CSV file
-    summary_df = pd.DataFrame(summary_data)  # Convert the summary list of dictionaries into a pandas DataFrame
-    df_summary = summary_df.sort_values(by="Mouse ID")  # Sort the summary table by Mouse ID for easier inspection
-    df_summary.to_csv(output_csv_path, index=False)  # Export the DataFrame to a CSV file at the specified path
-    print(f"\n✅ ECG summary exported to: {output_csv_path}")  # Confirm successful export
-
-    # sliding_hrv_pdf.close()
-    # print(f"\n✅ All sliding HRV plots saved to: {sliding_hrv_pdf_path}")
-
-    # Plot correlation between auto-clean Ecgenie vs. my algorithm
+    # Plot correlation between ECGenie auto-clean results and algorithm results.
     print("Auto-Clean ECGenie vs. Algorithm")
     plot_ecg_correlation(software_data)
 
-    # Plot correlation between manual-clean Ecgenie vs. my algorithm
+    # Plot correlation between ECGenie manual-clean results and algorithm results.
     print("Manual-Clean ECGenie vs. Algorithm")
     plot_ecg_correlation(cut_data)
 
-
-
-# Run the ECG summary generation pipeline on all files in the specified folder
+# Example usage of the generate_ecg_summary function.
+# Specify input data folder, output CSV path, and output folder for filtered data.
 generate_ecg_summary(
-    data_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1_3',  # Folder containing raw ECG .txt files and ECGenie outputs
-    output_csv_path='/content/drive/MyDrive/ECG Report/Mouse_1_3/ECG_Metrics_Summary.csv',  # Where to save the summary CSV
-    output_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1_3/Filtered Data'  # Folder to store cleaned/filtered ECG text files
+    data_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1_3',
+    output_csv_path='/content/drive/MyDrive/ECG Report/Mouse_1_3/ECG_Metrics_Summary.csv',
+    output_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1_3/Filtered Data'
+)import os
+import numpy as np
+import pandas as pd
+from scipy.signal import find_peaks
+from scipy.stats import zscore
+import wfdb.processing
+from scipy.stats import pearsonr
+import matplotlib.pyplot as plt
+
+
+def check_file_format(file_path):
+    # Checks if the ECG data file is correctly formatted by attempting to open and read it.
+    # Returns True if data is successfully read, False otherwise.
+    times, voltages = open_ecg_data(file_path)
+    if len(times) > 0 and len(voltages) > 0:
+        return True
+    else:
+        return False
+
+def open_ecg_data(file_path):
+    # Opens a specified ECG data file and parses time and voltage values.
+    # Assumes a space-separated format 'time voltage' per line.
+    # Returns two numpy arrays: times and voltages.
+    times = []
+    voltages = []
+    with open(file_path, 'r') as file:
+        lines = file.readlines()
+        for line in lines:
+            try:
+                time_str, voltage_str = line.split()
+                times.append(float(time_str))
+                voltages.append(float(voltage_str))
+            except ValueError:
+                # Skips lines that do not conform to the expected 'time voltage' format.
+                continue
+    return np.array(times), np.array(voltages)
+
+def detect_abnormal_segments(times, voltages, window_size=100, step_fraction=0.25,
+                              std_factor_low=0.3, std_factor_high=2.0, mean_thresh_factor=1.2,
+                              plot_debug=False):
+    # Identifies segments of the ECG signal that are potentially abnormal based on statistical properties.
+    # Uses a sliding window approach to calculate standard deviation and mean absolute voltage.
+    # Segments with STD too low/high or mean too high are marked as abnormal.
+    voltages = np.array(voltages)
+    times = np.array(times)
+    global_std = np.std(voltages)
+    global_mean = np.mean(np.abs(voltages))
+    std_thresh_low = std_factor_low * global_std
+    std_thresh_high = std_factor_high * global_std
+    mean_thresh = mean_thresh_factor * global_mean
+    stds = []
+    abnormal_times = []
+    step_size = int(window_size * step_fraction)
+    for i in range(0, len(voltages) - window_size, step_size):
+        segment = voltages[i:i + window_size]
+        segment_std = np.std(segment)
+        segment_mean = np.abs(np.mean(segment))
+        stds.append(segment_std)
+        # Marks a segment as abnormal if its standard deviation or absolute mean exceeds predefined thresholds.
+        if segment_std < std_thresh_low or segment_std > std_thresh_high or segment_mean > mean_thresh:
+            mid_time = times[i + window_size // 2]
+            # Prevents marking closely spaced abnormal segments as separate.
+            if len(abnormal_times) == 0 or (mid_time - abnormal_times[-1] > 0.2):
+                abnormal_times.append(mid_time)
+    return np.array(abnormal_times), stds
+
+def consolidate_abnormal_segments(abnormal_times, merge_distance=1.0):
+    # Consolidates closely spaced abnormal segments into single, representative points.
+    # This helps in simplifying the removal of noisy regions.
+    if len(abnormal_times) == 0:
+        return np.array([])
+    abnormal_times = np.sort(abnormal_times)
+    # Identifies new groups of abnormal segments based on a merge_distance.
+    group_flags = np.diff(abnormal_times) > merge_distance
+    group_flags = np.insert(group_flags, 0, True)
+    group_ids = np.cumsum(group_flags)
+    # Calculates the mean time for each consolidated abnormal group.
+    unique_centers = [np.mean(abnormal_times[group_ids == gid]) for gid in np.unique(group_ids)]
+    return np.array(unique_centers)
+
+def get_adaptive_prominence(voltages, lower=90, scale=0.35):
+    # Calculates an adaptive prominence threshold for peak detection.
+    # This threshold is based on a percentile of the absolute voltage values, scaled.
+    percentile_value = np.percentile(np.abs(voltages), lower)
+    return percentile_value * scale
+
+def calculate_pnn50(rr_intervals):
+    # Calculates pNN50, a Heart Rate Variability (HRV) parameter.
+    # pNN50 is the percentage of successive RR intervals that differ by more than 50 milliseconds.
+    if len(rr_intervals) < 2:
+        return None
+    rr_diff = np.abs(np.diff(rr_intervals))
+    nn50 = np.sum(rr_diff > 0.050) # Count of RR differences > 50ms (0.050 seconds).
+    pnn50 = (nn50 / len(rr_diff)) * 100 if len(rr_diff) > 0 else 0
+    return pnn50
+
+def calculate_hrv(times, voltages, fs=2000):
+    # Calculates various Heart Rate Variability (HRV) parameters.
+    # Detects R-peaks, corrects them, and then computes SDNN, RMSSD, Mean HR, and pNN50.
+    dt = 1.0 / fs
+    rr_min_sec = 0.05 # Minimum R-R interval in seconds.
+    min_distance_samples = int(rr_min_sec * fs) # Minimum distance between peaks in samples.
+    # Determine prominence for peak detection based on the signal's amplitude.
+    prominence_mV = max(get_adaptive_prominence(voltages, lower=88, scale=0.45), 0.08)
+    # Detects raw R-peaks using `find_peaks`.
+    raw_peaks, _ = find_peaks(
+        voltages,
+        distance=min_distance_samples,
+        prominence=prominence_mV
+    )
+    # Corrects detected R-peaks for better accuracy using WFDB processing.
+    corrected_peaks = wfdb.processing.correct_peaks(
+        sig=voltages,
+        peak_inds=raw_peaks,
+        search_radius=int(0.025 * fs),
+        smooth_window_size=int(0.020 * fs),
+        peak_dir="up"
+    )
+    # Extracts time points of corrected R-peaks.
+    r_peak_times = times[corrected_peaks]
+    # Calculates RR intervals (time differences between successive R-peaks).
+    rr_intervals = np.diff(r_peak_times)
+    # Filters RR intervals to exclude physiologically improbable values.
+    rr_intervals = rr_intervals[(rr_intervals > 0.06) & (rr_intervals < 0.2)]
+    if len(rr_intervals) < 2:
+        # Notifies if insufficient RR intervals are found for reliable HRV calculation.
+        print("❌ Not enough valid RR intervals for HRV calculation.")
+        return None, None, None, None, None, None
+    # Calculates SDNN (Standard Deviation of NN intervals).
+    sdnn_sec = np.std(rr_intervals)
+    diff_rr = np.diff(rr_intervals)
+    # Calculates RMSSD (Root Mean Square of Successive Differences).
+    rmssd_sec = np.sqrt(np.mean(diff_rr ** 2))
+    mean_rr = np.mean(rr_intervals)
+    # Calculates Heart Rate in beats per minute.
+    hr_bpm = 60 / mean_rr if mean_rr > 0 else None
+    # Calculates pNN50.
+    pnn50 = calculate_pnn50(rr_intervals)
+    return sdnn_sec, rmssd_sec, rr_intervals, corrected_peaks, hr_bpm, pnn50
+
+def shift_and_shorten(times, voltages):
+    # Removes zero-voltage points and re-indexes the time array starting from zero.
+    # This is useful for processing signals where parts might be truncated or invalid.
+    nonzero_mask = voltages != 0
+    valid_voltages = voltages[nonzero_mask]
+    # Estimates the time step from the valid time points.
+    dt = np.median(np.diff(times))
+    # Creates a new time array, starting from 0, for the valid voltages.
+    new_times = np.arange(len(valid_voltages)) * dt
+    return new_times, valid_voltages
+
+def zscore_filter(times, voltages, threshold=2.0):
+    # Filters voltage outliers using the Z-score method.
+    # Points with Z-scores exceeding a threshold are removed.
+    z_scores = zscore(voltages)
+    mask = np.abs(z_scores) < threshold
+    removed_count = len(mask) - np.sum(mask)
+    print(f"Z-score filtering removed {removed_count} amplitude outlier points")
+    filtered_times = times[mask]
+    filtered_voltages = voltages[mask]
+    return filtered_times, filtered_voltages
+
+def compute_adaptive_jump_threshold(voltages, percentile=99):
+    # Computes a threshold for detecting sudden voltage jumps (spikes).
+    # The threshold is based on a high percentile of the absolute differences between successive voltage points.
+    diffs = np.abs(np.diff(voltages))
+    return np.percentile(diffs, percentile)
+
+def compute_sliding_hrv_with_peaks(times, r_peaks, fs=2000, window_sec=4, step_sec=1):
+    # Computes sliding window HRV (SDNN) values across the ECG signal.
+    # This helps in observing how HRV changes over time.
+    r_times = times[r_peaks]
+    hrv_values = []
+    time_stamps = []
+    start_time = times[0]
+    end_time = times[-1]
+    window_start = start_time
+    while window_start + window_sec <= end_time:
+        window_end = window_start + window_sec
+        # Filters R-peak times within the current sliding window.
+        mask = (r_times >= window_start) & (r_times <= window_end)
+        rr_window = np.diff(r_times[mask])
+        # Filters valid RR intervals within the window.
+        valid_rr = rr_window[(rr_window > 0.06) & (rr_window < 0.2)]
+        if len(valid_rr) >= 2:
+            sdnn_ms = np.std(valid_rr) * 1000 # SDNN in milliseconds.
+            hrv_values.append(sdnn_ms)
+            time_stamps.append(window_start + window_sec / 2) # Mid-point of the window.
+        window_start += step_sec
+    return time_stamps, hrv_values
+
+def compute_and_plot_sliding_hr_difference(times, r_peaks, fs=2000, window_sec=4, step_sec=1, title="Sliding HR Change"):
+    # Computes and plots the change in heart rate (ΔHR) over time using a sliding window.
+    # This can highlight periods of significant HR fluctuations.
+    r_times = times[r_peaks]
+    window_starts = []
+    hr_values = []
+    start_time = times[0]
+    end_time = times[-1]
+    current_start = start_time
+    while current_start + window_sec <= end_time:
+        current_end = current_start + window_sec
+        # Filters R-peak times within the current sliding window.
+        mask = (r_times >= current_start) & (r_times <= current_end)
+        rr_window = np.diff(r_times[mask])
+        # Filters valid RR intervals within the window.
+        valid_rr = rr_window[(rr_window > 0.06) & (rr_window < 0.2)]
+        if len(valid_rr) >= 1:
+            mean_rr = np.mean(valid_rr)
+            hr = 60 / mean_rr # Calculates HR for the window.
+            hr_values.append(hr)
+            window_starts.append(current_start + window_sec / 2) # Mid-point of the window.
+        current_start += step_sec
+    # Calculates the difference in HR between consecutive windows.
+    delta_hr = np.diff(hr_values)
+    delta_times = window_starts[1:] # Time points corresponding to delta_hr.
+    # Plots the sliding HR difference.
+    plt.figure(figsize=(10, 4))
+    plt.plot(delta_times, delta_hr, marker='o', linestyle='-', color='teal')
+    plt.axhline(0, color='gray', linestyle='--') # Adds a horizontal line at y=0 for reference.
+    plt.xlabel("Time (s)")
+    plt.ylabel("ΔHR (bpm)")
+    plt.title(title)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+    return delta_times, delta_hr
+
+def plot_ecg_correlation(software_data):
+    # Plots correlation between ECGenie software calculated HR/HRV and algorithm calculated HR/HRV.
+    # Helps in validating the algorithm's performance against a known tool.
+    print(software_data)
+    filenames = list(software_data.keys())
+    print(filenames)
+
+    if not filenames:
+        print("No data available for correlation plots. Skipping.")
+        return
+
+    # Extracts HR and HRV values from ECGenie and the algorithm's filtered data.
+    ecg_hr = [software_data[f]["HR"] for f in filenames if "HR" in software_data[f] and software_data[f]["HR"] is not None]
+    ecg_hrv = [software_data[f]["HRV"] for f in filenames if "HRV" in software_data[f] and software_data[f]["HRV"] is not None]
+    data_hr = [software_data[f]["Filtered HR"] for f in filenames if "Filtered HR" in software_data[f] and software_data[f]["Filtered HR"] is not None]
+    data_hrv = [software_data[f]["Filtered HRV"] for f in filenames if "Filtered HRV" in software_data[f] and software_data[f]["Filtered HRV"] is not None]
+
+    # Checks if there is enough valid data for plotting and correlation.
+    if not (len(ecg_hr) > 1 and len(data_hr) > 1 and len(ecg_hrv) > 1 and len(data_hrv) > 1):
+        print("Not enough valid data points for correlation plots. Skipping.")
+        return
+
+    indices = np.arange(len(filenames))
+    plt.figure(figsize=(12, 5))
+
+    # Plot for Heart Rate Comparison (scatter plot against file index).
+    plt.subplot(1, 2, 1)
+    plt.scatter(indices, ecg_hr, color='blue', label='ECGenie HR (bpm)', marker='o')
+    plt.scatter(indices, data_hr, color='green', label='Filtered HR (bpm)', marker='x')
+    plt.title("Heart Rate Comparison")
+    plt.xlabel("File Index")
+    plt.ylabel("HR (bpm)")
+    plt.legend()
+    plt.grid(True)
+
+    # Plot for HRV Comparison (scatter plot against file index).
+    plt.subplot(1, 2, 2)
+    plt.scatter(indices, ecg_hrv, color='blue', label='ECGenie HRV (bpm)', marker='o')
+    plt.scatter(indices, data_hrv, color='green', label='Filtered HRV (bpm)', marker='x')
+    plt.title("HRV Comparison")
+    plt.xlabel("File Index")
+    plt.ylabel("HRV (bpm)")
+    plt.legend()
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+    # Compute Pearson correlation coefficients for HR and HRV.
+    corr_hr = pearsonr(ecg_hr, data_hr)[0]
+    corr_hrv = pearsonr(ecg_hrv, data_hrv)[0]
+
+    plt.figure(figsize=(12, 5))
+
+    # Plot for HR Correlation (scatter plot of ECGenie HR vs. Filtered HR).
+    plt.subplot(1, 2, 1)
+    plt.scatter(ecg_hr, data_hr, color='blue', alpha=0.7)
+    min_val = min(min(ecg_hr), min(data_hr))
+    max_val = max(max(ecg_hr), max(data_hr))
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal Line') # Ideal correlation line.
+    plt.xlabel("ECGenie HR (bpm)")
+    plt.ylabel("Filtered HR (bpm)")
+    plt.title(f"HR Correlation (r = {corr_hr:.2f})")
+    plt.grid(True)
+    plt.legend()
+
+    # Plot for HRV Correlation (scatter plot of ECGenie HRV vs. Filtered HRV).
+    plt.subplot(1, 2, 2)
+    plt.scatter(ecg_hrv, data_hrv, color='green', alpha=0.7)
+    min_val = min(min(ecg_hrv), min(data_hrv))
+    max_val = max(max(ecg_hrv), max(data_hrv))
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Ideal Line') # Ideal correlation line.
+    plt.xlabel("ECGenie HRV (bpm)")
+    plt.ylabel("Filtered HRV (bpm)")
+    plt.title(f"HRV Correlation (r = {corr_hrv:.2f})")
+    plt.grid(True)
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    print(f"\nPearson correlation (HR): {corr_hr:.4f}")
+    print(f"Pearson correlation (HRV): {corr_hrv:.4f}")
+
+def identify_qrs_complexes(times, voltages, r_peaks, fs=2000, search_window_sec=0.015, derivative_threshold_factor=0.5):
+    # Identifies the start and end points of QRS complexes around detected R-peaks.
+    # Uses the derivative of the ECG signal to find points where the slope changes significantly.
+    qrs_starts = []
+    qrs_ends = []
+    dt = 1.0 / fs
+    voltages_diff = np.diff(voltages) / dt # Calculate derivative of voltages.
+    # Determine a threshold for derivative to identify QRS boundaries.
+    derivative_threshold = np.max(np.abs(voltages_diff)) * derivative_threshold_factor
+    for r_peak_idx in r_peaks:
+        search_window_samples = int(search_window_sec * fs)
+        start_search = max(0, r_peak_idx - search_window_samples)
+        end_search = min(len(voltages) - 1, r_peak_idx + search_window_samples)
+        qrs_start = None
+        # Search backward from R-peak to find QRS onset.
+        for i in range(r_peak_idx, start_search, -1):
+            if i - 1 >= 0 and np.abs(voltages_diff[i - 1]) < derivative_threshold:
+                qrs_start = i
+                break
+        if qrs_start is None:
+            qrs_start = start_search # Default to start of search window if no clear onset found.
+        qrs_end = None
+        # Search forward from R-peak to find QRS offset.
+        for i in range(r_peak_idx, end_search):
+            if i < len(voltages_diff) and np.abs(voltages_diff[i]) < derivative_threshold:
+                qrs_end = i
+                break
+        if qrs_end is None:
+            qrs_end = end_search # Default to end of search window if no clear offset found.
+        qrs_starts.append(qrs_start)
+        qrs_ends.append(qrs_end)
+    return np.array(qrs_starts), np.array(qrs_ends)
+
+def find_p_wave_timing(times, voltages, qrs_start_idx, fs=2000, p_wave_search_window_ms=(10, 60), prominence_factor=0.05, derivative_threshold_factor=0.05):
+    # Identifies the onset and offset of P-waves before each QRS complex.
+    # This is crucial for calculating PR and PQ intervals.
+    p_onset_idx = None
+    p_offset_idx = None
+    # Define search window for P-wave relative to QRS onset.
+    min_samples_before_qrs = int(p_wave_search_window_ms[0] / 1000 * fs)
+    max_samples_before_qrs = int(p_wave_search_window_ms[1] / 1000 * fs)
+
+    start_search_p = max(0, qrs_start_idx - max_samples_before_qrs)
+    end_search_p = min(len(voltages), qrs_start_idx - min_samples_before_qrs)
+
+    if end_search_p <= start_search_p:
+        return None, None # No valid search window for P-wave.
+
+    # Extract segment for P-wave analysis.
+    p_wave_segment_voltages = voltages[start_search_p:end_search_p]
+    p_wave_segment_times = times[start_search_p:end_search_p]
+
+    if len(p_wave_segment_voltages) == 0:
+        return None, None
+
+    # Determine prominence for P-wave peak detection.
+    prominence_threshold = np.max(np.abs(p_wave_segment_voltages)) * prominence_factor
+    # Find potential P-wave peaks (positive or negative).
+    p_peaks, _ = find_peaks(p_wave_segment_voltages, prominence=prominence_threshold, distance=int(0.01 * fs))
+    if len(p_peaks) == 0:
+        p_peaks, _ = find_peaks(-p_wave_segment_voltages, prominence=prominence_threshold, distance=int(0.01 * fs))
+        if len(p_peaks) == 0:
+            return None, None # No P-wave peak found.
+
+    # Identify the most prominent P-wave peak in the segment.
+    p_peak_local_idx = p_peaks[np.argmax(np.abs(p_wave_segment_voltages[p_peaks]))]
+    p_peak_global_idx = start_search_p + p_peak_local_idx
+
+    dt = 1.0 / fs
+    voltages_diff = np.diff(voltages) / dt # Calculate derivative for P-wave boundaries.
+    max_abs_diff = np.max(np.abs(voltages_diff[start_search_p:qrs_start_idx])) if qrs_start_idx > start_search_p else 0
+    if max_abs_diff == 0: return None, None
+    derivative_threshold = max_abs_diff * derivative_threshold_factor
+
+    # Search backward from P-peak to find P-wave onset.
+    for i in range(p_peak_global_idx, start_search_p, -1):
+        if i < len(voltages_diff) and np.abs(voltages_diff[i-1]) < derivative_threshold:
+            potential_onset = i
+            if potential_onset < p_peak_global_idx:
+                p_onset_idx = potential_onset
+                break
+    if p_onset_idx is None: p_onset_idx = start_search_p # Default if onset not found.
+
+    # Search forward from P-peak to find P-wave offset.
+    baseline_voltage_at_qrs_onset = voltages[qrs_start_idx] # Reference baseline.
+    for i in range(p_peak_global_idx, qrs_start_idx):
+        if i < len(voltages_diff) and np.abs(voltages_diff[i]) < derivative_threshold and np.abs(voltages[i] - baseline_voltage_at_qrs_onset) < np.max(np.abs(p_wave_segment_voltages)) * 0.1:
+            p_offset_idx = i
+            break
+    if p_offset_idx is None: p_offset_idx = qrs_start_idx -1 # Default if offset not found.
+
+    return p_onset_idx, p_offset_idx
+
+def calculate_pr_intervals(times, qrs_starts, p_wave_onsets):
+    # Calculates the PR interval, defined as the duration from the start of the P-wave to the start of the QRS complex.
+    pr_intervals = []
+    min_len = min(len(qrs_starts), len(p_wave_onsets))
+    for i in range(min_len):
+        if p_wave_onsets[i] is not None and qrs_starts[i] is not None:
+            # Ensure P-wave onset precedes QRS start and both indices are valid.
+            if 0 <= p_wave_onsets[i] < len(times) and 0 <= qrs_starts[i] < len(times) and times[p_wave_onsets[i]] < times[qrs_starts[i]]:
+                pr_interval = times[qrs_starts[i]] - times[p_wave_onsets[i]]
+                if pr_interval > 0:
+                    pr_intervals.append(pr_interval)
+    return np.array(pr_intervals)
+
+def calculate_pq_intervals(times, qrs_starts, p_wave_offsets):
+    # Calculates the PQ interval, defined as the duration from the end of the P-wave to the start of the QRS complex.
+    pq_intervals = []
+    min_len = min(len(qrs_starts), len(p_wave_offsets))
+    for i in range(min_len):
+        if p_wave_offsets[i] is not None and qrs_starts[i] is not None:
+            # Ensure P-wave offset precedes QRS start and both indices are valid.
+            if 0 <= p_wave_offsets[i] < len(times) and 0 <= qrs_starts[i] < len(times) and times[p_wave_offsets[i]] < times[qrs_starts[i]]:
+                pq_interval = times[qrs_starts[i]] - times[p_wave_offsets[i]]
+                if pq_interval > 0:
+                    pq_intervals.append(pq_interval)
+    return np.array(pq_intervals)
+
+def process_ecg_file(file_path, output_folder, jump_threshold=0.5,
+                     std_thresh_low=0.02, std_thresh_high=0.8):
+    # Main function to process a single ECG file, apply filtering, calculate HRV, and save results.
+
+    # Create a folder for filtered data images if it doesn't exist.
+    image_folder = os.path.join(output_folder, "Filtered Data Images")
+    os.makedirs(image_folder, exist_ok=True)
+    base_filename = os.path.splitext(os.path.basename(file_path))[0]
+
+    # Open original ECG data.
+    times, voltages = open_ecg_data(file_path)
+    print(f"Original signal length: {len(voltages)} points")
+
+    # Compute an adaptive jump threshold based on voltage differences.
+    jump_threshold = compute_adaptive_jump_threshold(voltages, percentile=99)
+
+    # Remove amplitude outliers (voltages > +/- 5mV).
+    voltage_mask = np.abs(voltages) <= 5
+    times_no_outliers = times[voltage_mask]
+    voltages_no_outliers = voltages[voltage_mask]
+    print(f"Removed {len(voltages) - len(voltages_no_outliers)} outlier points (> \u00b15 mV)")
+
+    # Remove spike points based on sudden voltage jumps.
+    diffs = np.abs(np.diff(voltages_no_outliers))
+    smooth_mask = np.insert(diffs < jump_threshold, 0, True) # Keep points where difference is below threshold.
+    times_cleaned = times_no_outliers[smooth_mask]
+    voltages_cleaned = voltages_no_outliers[smooth_mask]
+    print(f"Removed {len(voltages_no_outliers) - len(voltages_cleaned)} spike points (>{jump_threshold} mV jumps)")
+
+    # Detect and consolidate abnormal segments (e.g., noisy periods).
+    abnormal_times_raw, _ = detect_abnormal_segments(times_cleaned, voltages_cleaned)
+    abnormal_times = consolidate_abnormal_segments(abnormal_times_raw, merge_distance=1.0)
+
+    # Create a mask to remove the identified abnormal segments.
+    mask = np.ones(len(times_cleaned), dtype=bool)
+    for t_ab in abnormal_times:
+        mask &= ~((times_cleaned >= t_ab - 0.5) & (times_cleaned <= t_ab + 0.5)) # Remove 1-second window around abnormal point.
+    times_auto_filtered = times_cleaned[mask]
+    voltages_auto_filtered = voltages_cleaned[mask]
+    print(f"Auto-removed {len(voltages_cleaned) - len(voltages_auto_filtered)} abnormal points from {len(abnormal_times)} segments")
+
+    # Apply a first Z-score filter on the auto-filtered data.
+    times_auto_filtered, voltages_auto_filtered = zscore_filter(times_auto_filtered, voltages_auto_filtered)
+
+    # Shift and shorten the signal (remove zeros and re-index time).
+    times_filtered, voltages_filtered = shift_and_shorten(times_auto_filtered, voltages_auto_filtered)
+
+    # Apply a second Z-score filter on the concatenated data for final cleaning.
+    times_z_con, voltages_z_con = zscore_filter(times_filtered, voltages_filtered)
+    final_times = times_z_con
+    final_voltages = voltages_z_con
+
+    # Calculate HRV parameters at different stages of filtering for comparison.
+    sdnn_before, rmssd_before, rr_before_arr, peaks_before, hr_bpm_before, pnn50_before = calculate_hrv(times, voltages)
+    sdnn_after, rmssd_after, rr_after_arr, peaks_after, hr_bpm_after, pnn50_after = calculate_hrv(times_auto_filtered, voltages_auto_filtered)
+    sdnn_con, rmssd_con, rr_con_arr, peaks_con, hr_bpm_con, pnn50_con = calculate_hrv(times_filtered, voltages_filtered)
+    sdnn_z_con, rmssd_z_con, rr_z_con_arr, peaks_z_con, hr_bpm_z_con, pnn50_z_con = calculate_hrv(final_times, final_voltages)
+
+    # Calculate mean RR interval for the final filtered data.
+    mean_rr_con = np.mean(rr_z_con_arr) if rr_z_con_arr is not None and len(rr_z_con_arr) > 0 else None
+
+    # Identify QRS complexes, P-wave onsets/offsets for morphological analysis.
+    if peaks_z_con is not None and len(peaks_z_con) > 0:
+        qrs_starts, qrs_ends = identify_qrs_complexes(final_times, final_voltages, peaks_z_con)
+    else:
+        qrs_starts = np.array([])
+        qrs_ends = np.array([])
+
+    all_p_onsets = []
+    all_p_offsets = []
+    for qrs_start_idx in qrs_starts:
+        p_onset, p_offset = find_p_wave_timing(final_times, final_voltages, qrs_start_idx)
+        all_p_onsets.append(p_onset)
+        all_p_offsets.append(p_offset)
+
+    # Filter out None values from P-wave detections to get valid indices.
+    valid_p_onsets_indices = np.array([p_idx for p_idx in all_p_onsets if p_idx is not None])
+    valid_qrs_starts_for_pr = np.array([qrs_starts[i] for i, p_idx in enumerate(all_p_onsets) if p_idx is not None])
+    valid_p_offsets_indices = np.array([p_idx for p_idx in all_p_offsets if p_idx is not None])
+    valid_qrs_starts_for_pq = np.array([qrs_starts[i] for i, p_idx in enumerate(all_p_offsets) if p_idx is not None])
+
+    # Calculate PR and PQ intervals.
+    pr_intervals = calculate_pr_intervals(final_times, valid_qrs_starts_for_pr, valid_p_onsets_indices)
+    pq_intervals = calculate_pq_intervals(final_times, valid_qrs_starts_for_pq, valid_p_offsets_indices)
+
+    # Calculate average QRS duration, PR interval, and PQ interval.
+    avg_qrs_duration = np.mean(final_times[qrs_ends] - final_times[qrs_starts]) if len(qrs_starts) > 0 and len(qrs_ends) == len(qrs_starts) else None
+    avg_pr_interval = np.mean(pr_intervals) if len(pr_intervals) > 0 else None
+    avg_pq_interval = np.mean(pq_intervals) if len(pq_intervals) > 0 else None
+
+    # Prepare plotting range for consistent visualization.
+    mean_amp = np.mean(voltages)
+    std_amp = np.std(voltages)
+    plot_range = (mean_amp - 3 * std_amp, mean_amp + 3 * std_amp)
+
+    # Create a multi-panel plot to visualize the ECG signal at different processing stages.
+    fig, axs = plt.subplots(5, 1, figsize=(20, 20))
+
+    # Plot 1: Original ECG Data.
+    axs[0].plot(times, voltages, color='blue', linewidth=0.2)
+    if peaks_before is not None:
+        axs[0].plot(times[peaks_before], voltages[peaks_before], 'ro', label="R-peaks", markersize=4)
+    axs[0].set_title("Original ECG Data")
+    axs[0].set_xlabel("Time (s)")
+    axs[0].set_ylabel("Voltage (mV)")
+    axs[0].set_ylim(plot_range)
+    axs[0].grid(True)
+
+    # Plot 2: ECG after auto-filtering abnormal segments.
+    axs[1].plot(times_auto_filtered, voltages_auto_filtered, color='blue', linewidth=0.2)
+    if peaks_after is not None:
+      axs[1].plot(times_auto_filtered[peaks_after], voltages_auto_filtered[peaks_after], 'ro', label="R-peaks", markersize=4)
+    axs[1].set_title("ECG (Auto-Filtered Abnormal Segments)")
+    axs[1].set_xlabel("Time (s)")
+    axs[1].set_ylabel("Voltage (mV)")
+    axs[1].set_ylim(plot_range)
+    axs[1].grid(True)
+
+    # Plot 3: Concatenated ECG (zeros removed and time reindexed).
+    axs[2].plot(times_filtered, voltages_filtered, color='blue', linewidth=0.2)
+    if peaks_con is not None:
+        axs[2].plot(times_filtered[peaks_con], voltages_filtered[peaks_con], 'ro', label="R-peaks", markersize=4)
+    axs[2].set_title("Concatenated ECG (Zeros Removed & Time Reindexed)")
+    axs[2].set_xlabel("Time (s)")
+    axs[2].set_ylabel("Voltage (mV)")
+    axs[2].set_ylim(plot_range)
+    axs[2].grid(True)
+
+    # Plot 4: Final ECG signal after the second Z-score filtering.
+    axs[3].plot(final_times, final_voltages, color='blue', linewidth=0.2)
+    if peaks_z_con is not None:
+        axs[3].plot(final_times[peaks_z_con], final_voltages[peaks_z_con], 'ro', label="R-peaks", markersize=2)
+    axs[3].set_title("2nd Z-score Filtering on concatenated data (Final Signal)")
+    axs[3].set_xlabel("Time (s)")
+    axs[3].set_ylabel("Voltage (mV)")
+    axs[3].set_ylim(plot_range)
+    axs[3].grid(True)
+
+    # Plot 5: Sliding HRV (SDNN) over time for the final signal.
+    if final_times is not None and peaks_z_con is not None:
+        time_stamps, hrv_values = compute_sliding_hrv_with_peaks(final_times, peaks_z_con)
+        axs[4].plot(time_stamps, hrv_values, color='purple', label="Sliding HRV (SDNN)")
+        axs[4].set_title("Sliding HRV (SDNN in ms)")
+        axs[4].set_xlabel("Time (s)")
+        axs[4].set_ylabel("HRV (ms)")
+        axs[4].grid(True)
+    else:
+        axs[4].set_title("Sliding HRV (Not enough valid data)")
+        axs[4].set_xlabel("Time (s)")
+        axs[4].set_ylabel("HRV (ms)")
+        axs[4].grid(True)
+
+    # Save the summary plot and display it.
+    output_img_path = os.path.join(image_folder, f"{base_filename}_summary.jpg")
+    plt.tight_layout()
+    plt.savefig(output_img_path, dpi=300)
+    plt.show()
+
+    # Compute and plot sliding HR difference for the final signal.
+    if final_times is not None and peaks_z_con is not None:
+      compute_and_plot_sliding_hr_difference(final_times, peaks_z_con, title=f"{base_filename} - Sliding HR Difference")
+    else:
+      print("❌ Not enough data to plot Sliding HR Difference.")
+
+    # Plot histogram of RR intervals at different filtering stages.
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 2)
+    if rr_before_arr is not None:
+        plt.hist(rr_before_arr, bins=50, histtype='step', linewidth=1.8, label="Before", color='gray')
+    if rr_after_arr is not None:
+        plt.hist(rr_after_arr, bins=50, histtype='step', linewidth=1.8, label="After Filtering", color='blue')
+    if rr_con_arr is not None:
+        plt.hist(rr_con_arr, bins=50, histtype='step', linewidth=1.8, label="After con", color='orange')
+    if rr_z_con_arr is not None:
+        plt.hist(rr_z_con_arr, bins=50, histtype='step', linewidth=1.8, label="After z con", color='red')
+    plt.title("Histogram of RR Intervals")
+    plt.xlabel("RR Interval (s)")
+    plt.ylabel("Frequency")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    # Format and print HRV and HR metrics for different filtering stages.
+    sdnn_before_str = f"{sdnn_before:.4f}s" if sdnn_before is not None else "N/A"
+    rmssd_before_str = f"{rmssd_before:.4f}s" if rmssd_before is not None else "N/A"
+    hr_bpm_before_str = f"{hr_bpm_before:.2f}" if hr_bpm_before is not None else "N/A"
+    pnn50_before_str = f"{pnn50_before:.2f}%" if pnn50_before is not None else "N/A"
+
+    sdnn_after_str = f"{sdnn_after:.4f}s" if sdnn_after is not None else "N/A"
+    rmssd_after_str = f"{rmssd_after:.4f}s" if rmssd_after is not None else "N/A"
+    hr_bpm_after_str = f"{hr_bpm_after:.2f}" if hr_bpm_after is not None else "N/A"
+    pnn50_after_str = f"{pnn50_after:.2f}%" if pnn50_after is not None else "N/A"
+
+    sdnn_con_str = f"{sdnn_con:.4f}s" if sdnn_con is not None else "N/A"
+    rmssd_con_str = f"{rmssd_con:.4f}s" if rmssd_con is not None else "N/A"
+    hr_bpm_con_str = f"{hr_bpm_con:.2f}" if hr_bpm_con is not None else "N/A"
+    pnn50_con_str = f"{pnn50_con:.2f}%" if pnn50_con is not None else "N/A"
+
+    sdnn_z_con_str = f"{sdnn_z_con:.4f}s" if sdnn_z_con is not None else "N/A"
+    rmssd_z_con_str = f"{rmssd_z_con:.4f}s" if rmssd_z_con is not None else "N/A"
+    hr_bpm_z_con_str = f"{hr_bpm_z_con:.2f}" if hr_bpm_z_con is not None else "N/A"
+    pnn50_z_con_str = f"{pnn50_z_con:.2f}%" if pnn50_z_con is not None else "N/A"
+
+    print(f"Before filtering: SDNN: {sdnn_before_str}, RMSSD: {rmssd_before_str}, BPM: {hr_bpm_before_str}, R-peaks: {len(peaks_before) if peaks_before is not None else 0}, pNN50: {pnn50_before_str}")
+    print(f"After auto-filtering: SDNN: {sdnn_after_str}, RMSSD: {rmssd_after_str}, BPM: {hr_bpm_after_str}, R-peaks: {len(peaks_after) if peaks_after is not None else 0}, pNN50: {pnn50_after_str}")
+    print(f"After concatenation: SDNN: {sdnn_con_str}, RMSSD: {rmssd_con_str}, BPM: {hr_bpm_con_str}, R-peaks: {len(peaks_con) if peaks_con is not None else 0}, pNN50: {pnn50_con_str}")
+    print(f"After 2nd z-score on concatenation (Final): SDNN: {sdnn_z_con_str}, RMSSD: {rmssd_z_con_str}, BPM: {hr_bpm_z_con_str}, R-peaks: {len(peaks_z_con) if peaks_z_con is not None else 0}, pNN50: {pnn50_z_con_str}")
+
+    # Handle None values for printing formatted strings for morphological parameters.
+    avg_qrs_duration_str = f"{avg_qrs_duration:.4f}s" if avg_qrs_duration is not None else "N/A"
+    avg_pr_interval_str = f"{avg_pr_interval:.4f}s" if avg_pr_interval is not None else "N/A"
+    avg_pq_interval_str = f"{avg_pq_interval:.4f}s" if avg_pq_interval is not None else "N/A"
+
+    print(f"Average QRS Duration: {avg_qrs_duration_str}, Average PR Interval: {avg_pr_interval_str}, Average PQ Interval: {avg_pq_interval_str}")
+
+    # Save the final filtered ECG data to a new file.
+    os.makedirs(output_folder, exist_ok=True)
+    output_filename = os.path.basename(file_path).replace('.txt', '_filtered.txt')
+    output_path = os.path.join(output_folder, output_filename)
+    if final_times is not None and final_voltages is not None:
+        with open(output_path, 'w') as f:
+            f.write("Time\tVoltage\n")
+            for t, v in zip(final_times, final_voltages):
+                f.write(f"{t:.6f}\t{v:.6f}\n")
+        print(f"Saved filtered file to: {output_path}")
+    else:
+        print(f"❌ Not enough valid data to save filtered file for {base_filename}.")
+
+    # Calculate percentage of data removed.
+    percent_removed = 100 * (1 - len(voltages_auto_filtered) / len(voltages)) if len(voltages) > 0 else None
+
+    return final_times, final_voltages, sdnn_z_con, rmssd_z_con, mean_rr_con, hr_bpm_z_con, len(peaks_z_con) if peaks_z_con is not None else 0, percent_removed, pnn50_z_con, avg_qrs_duration, avg_pr_interval, avg_pq_interval
+
+def generate_ecg_summary(data_folder_path, output_csv_path, output_folder_path):
+    # Orchestrates the processing of multiple ECG files and generates a summary CSV.
+    # Also compares algorithm results with ECGenie software outputs.
+    summary_data = []
+    ecg_hr, ecg_hrv = [], []
+    data_hr, data_hrv = [], []
+
+    # Define paths for ECGenie output files.
+    software_path = os.path.join(data_folder_path, "ECGenie Outputs.csv")
+    software_cut_path = os.path.join(data_folder_path, "ECGenie with Cuts.csv")
+    cut_data = {}
+    software_data = {}
+
+    # Load HR and HRV data from ECGenie automatic output.
+    if os.path.exists(software_path):
+        df_software = pd.read_csv(software_path)
+        if "File" in df_software.columns and "HR(bpm)" in df_software.columns and "HRvar(bpm)" in df_software.columns:
+            for _, row in df_software.iterrows():
+                software_data[row["File"]] = {
+                    "HR": row["HR(bpm)"],
+                    "HRV": row["HRvar(bpm)"]
+                }
+        else:
+            print("❌ Missing columns in ECGenie Output spreadsheet.")
+    else:
+        print("❌ ECGenie output spreadsheet not found.")
+
+    # Load HR and HRV data from ECGenie manual cuts output.
+    if os.path.exists(software_cut_path):
+        df_software = pd.read_csv(software_cut_path)
+        if "File" in df_software.columns and "HR(bpm)" in df_software.columns and "HRvar(bpm)" in df_software.columns:
+            for _, row in df_software.iterrows():
+                cut_data[row["File"]] = {
+                    "HR": row["HR(bpm)"],
+                    "HRV": row["HRvar(bpm)"]
+                }
+        else:
+            print("❌ Missing columns in ECGenie Manual Cuts spreadsheet.")
+    else:
+        print("❌ ECGenie Manual Cuts output spreadsheet not found.")
+
+    # Iterate through all .txt files in the data folder (excluding already filtered ones).
+    for filename in sorted(os.listdir(data_folder_path)):
+        if filename.endswith(".txt") and "_filtered" not in filename and "_metrics" not in filename:
+            file_path = os.path.join(data_folder_path, filename)
+            print(f"\nProcessing file: {filename}")
+
+            # Check file format before processing.
+            if not check_file_format(file_path):
+                print(f"⚠️ Skipping file due to format check failure: {filename}")
+                # Append entry with "Invalid Format" for skipped files.
+                summary_data.append({
+                    "File": filename,
+                    "Mouse ID": "Invalid Format",
+                    "HR (BPM)": None,
+                    "SDNN (s)": None,
+                    "RMSSD (s)": None,
+                    "RR (s)": None,
+                    "# of Signals": None,
+                    "% Removed": None,
+                    "pNN50 (%)": None,
+                    "Avg QRS Duration (s)": None,
+                    "Avg PR Interval (s)": None,
+                    "Avg PQ Interval (s)": None
+
+                })
+                continue
+
+            try:
+                # Extract mouse ID from filename.
+                parts = filename.replace(".txt", "").split("_")
+                mouse_id = "_".join(parts[1:]) if len(parts) > 1 else "Unknown"
+
+                # Process the ECG file and get all calculated metrics.
+                times_filtered, voltages_filtered, sdnn_con, rmssd_con, mean_rr, hr_clean, signals, percent_removed, pnn50_con, avg_qrs_duration, avg_pr_interval, avg_pq_interval = process_ecg_file(
+    file_path, output_folder_path)
+
+                # Update software data dictionaries with filtered HR/HRV for correlation.
+                if filename in software_data and hr_clean is not None and sdnn_con is not None:
+                    software_data[filename]["Filtered HR"] = hr_clean
+                    software_data[filename]["Filtered HRV"] = sdnn_con
+                if filename in cut_data and hr_clean is not None and sdnn_con is not None:
+                    cut_data[filename]["Filtered HR"] = hr_clean
+                    cut_data[filename]["Filtered HRV"] = sdnn_con
+
+                # Append calculated metrics to the summary data list.
+                summary_data.append({
+                    "File": filename,
+                    "Mouse ID": mouse_id,
+                    "HR (BPM)": hr_clean,
+                    "SDNN (s)": sdnn_con,
+                    "RMSSD (s)": rmssd_con,
+                    "RR (s)": mean_rr,
+                    "# of Signals": signals,
+                    "% Removed": percent_removed,
+                    "pNN50 (%)": pnn50_con,
+                    "Avg QRS Duration (s)": avg_qrs_duration,
+                    "Avg PR Interval (s)": avg_pr_interval,
+                    "Avg PQ Interval (s)": avg_pq_interval
+
+                })
+            except Exception as e:
+                # Handle errors during file processing.
+                print(f"❌ Error processing {filename}: {e}")
+                summary_data.append({
+                    "File": filename,
+                    "Mouse ID": "Unknown",
+                    "HR (BPM)": None,
+                    "SDNN (s)": None,
+                    "RMSSD (s)": None,
+                    "RR (s)": None,
+                    "# of Signals": None,
+                    "% Removed": None,
+                    "pNN50 (%)": None,
+                    "Avg QRS Duration (s)": None,
+                    "Avg PR Interval (s)": None,
+                    "Avg PQ Interval (s)": None
+
+                })
+
+    # Create a Pandas DataFrame from the summary data and save it to CSV.
+    summary_df = pd.DataFrame(summary_data)
+    df_summary = summary_df.sort_values(by="Mouse ID")
+    df_summary.to_csv(output_csv_path, index=False)
+    print(f"\n✅ ECG summary exported to: {output_csv_path}")
+
+    # Plot correlation between ECGenie auto-clean results and algorithm results.
+    print("Auto-Clean ECGenie vs. Algorithm")
+    plot_ecg_correlation(software_data)
+
+    # Plot correlation between ECGenie manual-clean results and algorithm results.
+    print("Manual-Clean ECGenie vs. Algorithm")
+    plot_ecg_correlation(cut_data)
+
+# Example usage of the generate_ecg_summary function.
+# Specify input data folder, output CSV path, and output folder for filtered data.
+generate_ecg_summary(
+    data_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1_3',
+    output_csv_path='/content/drive/MyDrive/ECG Report/Mouse_1_3/ECG_Metrics_Summary.csv',
+    output_folder_path='/content/drive/MyDrive/ECG Report/Mouse_1_3/Filtered Data'
 )
