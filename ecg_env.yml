@@ -1,0 +1,15 @@
+name: ecg-analysis
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.9
+  - numpy
+  - pandas
+  - matplotlib
+  - scipy
+  - wfdb
+  - seaborn
+  - pip
+  - pip:
+      - heartpy
